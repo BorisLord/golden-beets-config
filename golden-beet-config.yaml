@@ -90,8 +90,8 @@ zero:
   auto: yes
   update_database: yes
   fields: comments encoder grouping
-  comments: ['^Track \d+$', '^0$', '(?i)^no comment$', '(?i)https?://', '(?i)www\.', '(?i)\.(com|net|org|tk|br)\b', '(?i)\bEAC\b', '(?i)Exact Audio Copy', '(?i)\bLame\b', '(?i)CDex', '(?i)Easy CD-DA', '(?i)dBpoweramp', '(?i)AudioGrabber', '(?i)fre:ac', '(?i)\bGrip\b', '(?i)Tagged By', '(?i)Encoded by', '(?i)rip(ped)? (by|with)', '(?i)Created with', 'meXPiracy', '(?i)Autodesk', '(?i)bandcamp', '(?i)torrent', '(?i)blogspot']
-  grouping:  ['(?i)https?://', '(?i)www\.', '(?i)\.(com|net|org|tk|br)\b', '(?i)\bEAC\b', '(?i)Exact Audio Copy', '(?i)\bLame\b', '(?i)CDex', '(?i)dBpoweramp', '(?i)rip(ped)? (by|with)', 'meXPiracy', '(?i)bandcamp', '(?i)torrent', '(?i)blogspot']
+  comments: ['^Track \d+$', '^0$', '(?i)^no comment$', '(?i)https?://', '(?i)www\.', '(?i)\.(com|net|org|tk|br)\b', '(?i)\bEAC\b', '(?i)Exact Audio Copy', '(?i)\bLame\b', '(?i)CDex', '(?i)Easy CD-DA', '(?i)dBpoweramp', '(?i)AudioGrabber', '(?i)fre:ac', '(?i)\bGrip\b', '(?i)Tagged By', '(?i)Encoded by', '(?i)rip(ped)? (by|with)', '(?i)Created with', 'meXPiracy', '(?i)Autodesk', '(?i)bandcamp', '(?i)torrent', '(?i)blogspot', '(?i)\bLAMEB?\s*\d']
+  grouping:  ['(?i)https?://', '(?i)www\.', '(?i)\.(com|net|org|tk|br)\b', '(?i)\bEAC\b', '(?i)Exact Audio Copy', '(?i)\bLame\b', '(?i)CDex', '(?i)dBpoweramp', '(?i)rip(ped)? (by|with)', 'meXPiracy', '(?i)bandcamp', '(?i)torrent', '(?i)blogspot', '(?i)\bLAMEB?\s*\d']
 
 unimported:
   ignore_extensions: jpg png pdf log cue m3u nfo txt

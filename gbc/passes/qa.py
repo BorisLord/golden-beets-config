@@ -1,5 +1,5 @@
 """Pass 4 -- technical QA (READ-ONLY audit; ends with a conditional ACTIONS summary).
-Same 8 sections the old 04-qa.sh had, now in Python, logged to gbc.log. `scope` (a beets query, e.g.
+Sections logged to gbc.log. `scope` (a beets query, e.g.
 `added:<watermark>..`) narrows the audit to recent additions; empty scope = whole library.
 """
 import re
@@ -12,7 +12,7 @@ from .. import anomaly
 from ..beets import run_beet
 from ..logs import get_logger
 
-JUNK = re.compile(r"https?://|www\.|\.(com|net|org|tk|br)|\bEAC\b|\bLame\b|CDex|Easy CD-DA|Tagged By"
+JUNK = re.compile(r"https?://|www\.|\.(com|net|org|tk|br)|\bEAC\b|\bLame\b|\bLAMEB?\s*\d|CDex|Easy CD-DA|Tagged By"
                   r"|Encoded by|ripped by|Created with|meXPiracy|Autodesk|bandcamp|No Comment", re.I)
 
 
