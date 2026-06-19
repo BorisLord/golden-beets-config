@@ -4,7 +4,7 @@ from unittest import mock
 
 from musicrec import admin, cli
 from musicrec import config as configmod
-from musicrec.passes import enrich, import_, pipeline, qa
+from musicrec.passes import convert, import_, pipeline, qa
 from tests.base import Base
 
 
@@ -30,9 +30,14 @@ class TestCliDispatch(Base):
     def test_import_takes_lock_and_routes(self):
         with mock.patch.object(cli, "configure", lambda *a, **k: None), \
              mock.patch.object(configmod, "load", lambda: self.cfg), \
-             mock.patch.object(import_, "run", lambda c, src=None: 0), \
-             mock.patch.object(enrich, "run", lambda c, query="": 0):
+             mock.patch.object(import_, "run", lambda c, src=None: 0):
             self.assertEqual(cli.main(["import"]), 0)
+
+    def test_convert_takes_lock_and_routes(self):
+        with mock.patch.object(cli, "configure", lambda *a, **k: None), \
+             mock.patch.object(configmod, "load", lambda: self.cfg), \
+             mock.patch.object(convert, "run", lambda c: 0):
+            self.assertEqual(cli.main(["convert"]), 0)
 
 
 class TestAdminInit(Base):
@@ -48,7 +53,7 @@ class TestAdminInit(Base):
         self.assertIn(f"log: {self.cfg.log_dir}/import-decisions.log", text)      # patched
         for d in (self.cfg.src, self.cfg.clean, self.cfg.dump, self.cfg.log_dir):
             self.assertTrue(d.is_dir())                                           # dirs created
-        self.assertTrue((self.cfg.beetsdir / "fetchart-fs.yaml").exists())        # overlays deployed
+        self.assertTrue((self.cfg.beetsdir / "qa.yaml").exists())                 # qa overlay deployed
 
 
 if __name__ == "__main__":

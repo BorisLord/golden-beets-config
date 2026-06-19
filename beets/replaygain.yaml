@@ -1,9 +1,0 @@
-# replaygain.yaml overlay (loaded via `beet -c replaygain.yaml replaygain`).
-# Industry standard: ffmpeg backend = EBU R128 / ITU-R BS.1770 scan, ReplayGain 2.0 @ -18 LUFS reference
-# (beets default targetlevel 89 = -18 LUFS, via R128 LUFS+107). Opus -> R128_* tags, others -> REPLAYGAIN_*.
-# Deliberately replaces the plugins list: this pass only needs replaygain. ffmpeg backend required.
-plugins: replaygain
-replaygain:
-  backend: ffmpeg
-  overwrite: yes     # recompute OUR own track+album RG for all (fills the missing album gain)
-  auto: no

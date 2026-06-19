@@ -1,0 +1,20 @@
+# convert.yaml -- optional format normalisation overlay, driven by `musicrec convert`.
+#   WMA (lossy, proprietary/legacy ASF: poor players, weak tags, scrub mime=None crash) -> AAC/m4a ~256k
+#   WAV + AIFF (uncompressed PCM, ~no tags, huge)                                        -> FLAC (lossless)
+# Lossless source -> FLAC = ZERO quality loss + tags + ~half the size. Lossy WMA -> AAC = one generational
+# loss accepted for compat. Originals are MOVED to a quarantine subdir (keep_new) -- NEVER deleted. Operates
+# on the CLEAN lib only; the NAS source is read-only and untouched.
+plugins: convert
+convert:
+  formats:
+    aac:
+      command: ffmpeg -i $source -y -vn -acodec aac -b:a 256k $dest
+      extension: m4a
+    flac:
+      command: ffmpeg -i $source -y -vn -acodec flac $dest
+      extension: flac
+  keep_new: yes               # converted file replaces the item in the library; original -> dest (quarantine)
+  embed: yes                  # re-embed album art into the converted file
+  never_convert_lossy_files: no   # WMA lossy MUST be converted (that is the whole point)
+  id3v23: no
+ui: {color: no}

@@ -1,6 +1,0 @@
-# REBUILD overlay (loaded via `beet -c fetchart-fs.yaml` ON TOP of the rebuild config).
-# Grabs the cover art ALREADY present in the source folder (folder.jpg/cover) -> cover.jpg in the dest,
-# DURING import (`filesystem` source only = local, no online calls).
-fetchart:
-  auto: yes
-  sources: [filesystem]
