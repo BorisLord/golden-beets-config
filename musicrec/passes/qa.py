@@ -38,6 +38,30 @@ def _bucket(b):
     return "5. 320+/lossless"
 
 
+def _container_mismatch(path):
+    """Short reason if a file's magic bytes contradict its audio extension (e.g. RIFF/WAVE data in a .mp3),
+    else ''. Such files read fine in mediafile but carry EMPTY tags in TagLib -> break Navidrome/Jellyfin;
+    mp3val only WARNS and exits 0, so the integrity check misses them. The magic bytes don't lie."""
+    try:
+        with Path(path).open("rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return ""
+    if not head:
+        return "empty file"
+    ext = Path(path).suffix.lower()
+    ogg = head[:4] == b"OggS"
+    sig = {  # ext -> True when the leading bytes match what the extension claims
+        ".mp3": head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0),
+        ".flac": head[:4] == b"fLaC",
+        ".ogg": ogg, ".oga": ogg, ".opus": ogg,
+        ".m4a": head[4:8] == b"ftyp", ".m4b": head[4:8] == b"ftyp",
+    }
+    if ext in sig and not sig[ext]:
+        return f"RIFF/WAVE data in a {ext}" if head[:4] == b"RIFF" else f"not a {ext.lstrip('.')} stream"
+    return ""
+
+
 def run(cfg, scope: str = "") -> int:
     log = get_logger("qa")
     sc = [scope] if scope else []
@@ -73,16 +97,19 @@ def run(cfg, scope: str = "") -> int:
     for x in dups[:40]:
         log.info("  %s", x)
 
-    # 6. integrity: beet bad (count ERROR only) + ffmpeg decode of other formats
+    # 6. integrity: beet bad + ffmpeg decode of other formats. Count the per-FILE marker badfiles itself
+    #    prints ("<path>: checker exited with status N", or "file does not exist") -- flac --test and mp3val
+    #    emit DIFFERENT error text ("ERROR while decoding" vs "ERROR:"), so matching "ERROR:" missed flac.
     bad = _lines(cfg, ["bad", *sc])
-    baderr = sum(1 for x in bad if "ERROR:" in x)
-    log.info("=== 6. integrity (beet bad): %d ERROR ===", baderr)
-    for x in bad:
-        if "ERROR:" in x:
-            log.info("  %s", x)
+    fail = [x for x in bad if "checker exited with status" in x or "file does not exist" in x]
+    baderr = len(fail)
+    log.info("=== 6. integrity (beet bad): %d bad file(s) ===", baderr)
+    for x in fail:
+        log.info("  %s", x)
+    paths = _lines(cfg, ["ls", "-p", *sc])
     other_bad = 0
     if shutil.which("ffmpeg"):
-        for p in _lines(cfg, ["ls", "-p", *sc]):
+        for p in paths:
             if Path(p).suffix.lower() in (".mp3", ".flac"):
                 continue
             res = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", p, "-f", "null", "-"],
@@ -91,6 +118,13 @@ def run(cfg, scope: str = "") -> int:
                 other_bad += 1
                 log.info("  BAD: %s", p)
     log.info("=== 6b. other-format decode: %d bad ===", other_bad)
+
+    # 6c. container vs extension mismatch (magic bytes) -- a RIFF/WAVE file named .mp3 reads in mediafile
+    #     but breaks TagLib/Navidrome; mp3val warns yet exits 0, so 6/6b miss it. The bytes don't lie.
+    mism = [(p, why) for p in paths if (why := _container_mismatch(p))]
+    log.info("=== 6c. container/extension mismatch: %d ===", len(mism))
+    for p, why in mism:
+        log.info("  MISMATCH (%s): %s", why, p)
 
     # 7. junk metadata (comments + encoder noise)
     cmt = sum(1 for x in _lines(cfg, ["ls", "-f", "[$comments] | $artist - $title", "comments::.", *sc])
@@ -121,9 +155,11 @@ def run(cfg, scope: str = "") -> int:
     if dups:
         actions.append(f"[dups]    {len(dups)} duplicate track(s) -> review section 5, then: beet duplicates -m DUMP")
     if wma:
-        actions.append(f"[format]  {wma} WMA -> re-encode for car/older players if needed")
+        actions.append(f"[format]  {wma} WMA (legacy/proprietary, breaks scrub+players) -> `musicrec convert`")
     if baderr + other_bad:
         actions.append(f"[CORRUPT] {baderr + other_bad} file(s) failing integrity -> move to {cfg.dump} and re-rip")
+    if mism:
+        actions.append(f"[FORMAT]  {len(mism)} file(s) container!=extension (RIFF in .mp3 etc.) -> remux via ffmpeg")
     if anom:
         actions.append(f"[names]   {anom} name/title anomalies -> {workdir}/*.tsv (review)")
     for a in actions:
