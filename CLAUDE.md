@@ -15,11 +15,12 @@ complete, strong albums are kept — loose singletons stay parked in the source 
 ## Architecture (one core, several doors)
 
 `musicrec run` (manual) and `musicrec inbox` (cron, on drop) call the **same** pipeline
-(`musicrec/passes/pipeline.py`: import → enrich → replaygain → qa) — only the trigger + scope differ.
-Passes in `musicrec/passes/`; beets driven through `beets.run_beet` (captures stdout **and stderr** —
-beet logs its `--pretend` plan to stderr); config in `config.py`; the single logger in `logs.py`; the
-import lock (filelock) in `lock.py`; the incremental watermark in `state.py`. `setup.sh` is the only bash
-(bootstrap: deps + `uv tool install --editable .` + `musicrec init`).
+(`musicrec/passes/pipeline.py`: **import → qa**). beets does art/genres/replaygain/scrub/ftintitle
+**natively during `beet import`** (`auto: yes` in `config.yaml`); musicrec only adds **dedup** (before
+import) + **sidecars** (after) + **qa/anomaly** (audit). Passes in `musicrec/passes/`; beets driven
+through `beets.run_beet` (captures stdout **and stderr** — beet logs its `--pretend` plan to stderr);
+config in `config.py`; single logger in `logs.py`; import lock (filelock) in `lock.py`; incremental
+watermark (scopes qa) in `state.py`. `setup.sh` is the only bash (deps + `uv tool install --editable .` + `musicrec init`).
 
 - **Logs: one file** `$LOG_DIR/musicrec.log`, append-only, every line tagged `[pass]` + run id — same for
   `run` and `cron` (never per-pass files). beets' own decisions stay in `import-decisions.log`.

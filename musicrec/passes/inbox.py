@@ -42,7 +42,7 @@ def run(cfg) -> int:
             log.info("source empty -> exit")
             return 0
         _, plan = run_beet(cfg, ["import", "-q", "-i", "--pretend", str(cfg.src)],
-                           overlay="fetchart-fs.yaml", passname="inbox", echo_lines=False)
+                           passname="inbox", echo_lines=False)
         if not has_new(plan):
             log.info("nothing new to import -> exit")
             return 0

@@ -34,14 +34,12 @@ rest stay in `source/` to curate. Want other paths? Edit `config.env` (created b
 ## Commands
 
 ```
-musicrec run [--all]        full pipeline now (import -> enrich -> replaygain -> qa); --all reprocesses everything
+musicrec run [--all]        full pipeline now (import -> qa); --all = qa over the whole library
 musicrec inbox              cron door: import a drop if anything is new, then the pipeline
-musicrec import [SOURCE]    album-match import only
-musicrec enrich [QUERY]     front art + genres + ftintitle (default: whole library)
-musicrec replaygain [QUERY] ReplayGain (ffmpeg backend)
+musicrec import [SOURCE]    album-match import (art + genres + replaygain run automatically via beets)
 musicrec qa [QUERY]         read-only technical audit + anomaly scan
 musicrec anomaly [QUERY]    read-only name/anomaly scan only
-musicrec init [--cron]      deploy config + beets overlays (+ schedule cron)
+musicrec init [--cron]      deploy config + beets config (+ schedule cron)
 musicrec uninstall [--purge] remove the tooling (never your music)
 ```
 
@@ -87,18 +85,15 @@ system tools it prints the exact install command for your OS (apt/dnf/brew):
 
 ## Pipeline
 
-The four passes (run together by `musicrec run`, or individually). `library.db` is backed up before each
-mass write.
+`musicrec run` = **import → qa**. `library.db` is backed up before the import.
 
-| Pass | Role |
+| Step | Role |
 |---|---|
-| **import** | Album import with **AcoustID + tags**. Only complete, strong albums are kept (`quiet`, weak matches → skip). Scrub + folder cover during import; official sidecars (booklet/back/scan/`.lrc`) moved into the clean album. |
-| **enrich** | front artwork (`fetchart`/`embedart`), `lastgenre` (genres), `ftintitle` (move "feat. X" out of the artist into the title). |
-| **replaygain** | ReplayGain (EBU R128 volume, ffmpeg backend) — overlay `beets/replaygain.yaml`. |
+| **import** | Album import with **AcoustID + tags**. Only complete, strong albums are kept (`quiet`, weak matches → skip). **beets runs the enrichment natively during import** (`auto: yes`): scrub, **fetchart** (folder cover first, then web), **embedart**, **lastgenre** (genres), **ftintitle** (move "feat. X" into the title), **replaygain** (EBU R128, ffmpeg). musicrec adds **dedup** (drop duplicate audio first) + carries official sidecars (booklet/back/scan/`.lrc`) into the clean album. |
 | **qa** | READ-ONLY audit: format/bitrate/WMA, duplicates, integrity (`beet bad` for mp3/flac + ffmpeg decode for every other format), **junk metadata** (URLs/EAC/LAME in comments + encoder), then the anomaly scan; ends with a conditional **ACTIONS** summary. Overlay `beets/qa.yaml`. |
 
 Path templates (`config.yaml`): `$albumartist/$album/…`, compilations under `Various Artists/…`,
-VA soundtracks under `Soundtracks/…`. The `beets/fetchart-fs.yaml` overlay prefers the folder cover.
+VA soundtracks under `Soundtracks/…`. `fetchart` `sources` lists `filesystem` first, so the folder cover wins.
 
 `helpers/` fix the scrub crash on embedded images with `mime=None` (WMA/ASF). Run via uv (it pulls the
 libs): `uv run --with mediafile --with mutagen python helpers/<x>.py` — `scan-scrub-crash.py` to find
