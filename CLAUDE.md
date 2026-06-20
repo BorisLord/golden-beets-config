@@ -14,9 +14,9 @@ complete, strong albums are kept — loose singletons stay parked in the source 
 ## Architecture (one core, several doors)
 
 `gbc run` (manual) and `gbc inbox` (cron, on drop) call the **same** pipeline
-(`gbc/passes/pipeline.py`: **import → qa**). beets does art/genres/replaygain/scrub/ftintitle
+(`gbc/passes/pipeline.py`: **import → verify → qa**). beets does art/genres/replaygain/scrub/ftintitle
 **natively during `beet import`** (`auto: yes` in `config.yaml`); gbc only adds **dedup** (before
-import) + **sidecars** (after) + **qa/anomaly** (audit). Passes in `gbc/passes/`; beets driven
+import) + **sidecars** (after) + **verify** (AcoustID imposter -> quarantine) + **qa/anomaly** (audit). Passes in `gbc/passes/`; beets driven
 through `beets.run_beet` (captures stdout **and stderr** — beet logs its `--pretend` plan to stderr);
 config in `config.py`; single logger in `logs.py`; import lock (filelock) in `lock.py`; incremental
 watermark (scopes qa) in `state.py`. `setup.sh` is the only bash (deps + `uv tool install --editable .` + `gbc init`).

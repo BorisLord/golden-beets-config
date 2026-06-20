@@ -9,7 +9,7 @@ from datetime import datetime
 
 from .. import state
 from ..logs import get_logger
-from . import import_, qa
+from . import import_, qa, verify
 
 
 def run(cfg, *, full: bool = False, src=None) -> int:
@@ -24,6 +24,10 @@ def run(cfg, *, full: bool = False, src=None) -> int:
         return rc
     wm_new = datetime.now().replace(microsecond=0).isoformat()   # after import: this run's items are < wm_new
 
+    try:
+        verify.run(cfg, scope=scope)         # flag-only AcoustID check (imposter audio); best-effort, never gates
+    except Exception:                        # a verify hiccup must never break the import pipeline
+        log.exception("verify pass errored (non-fatal)")
     qa.run(cfg, scope=scope)                 # read-only audit (informational; never gates the watermark)
     state.set_watermark(cfg, wm_new)
     log.info("pipeline done; watermark -> %s", wm_new)

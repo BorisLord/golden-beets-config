@@ -5,6 +5,7 @@
   gbc import [SOURCE]    album-match import only (art + genres + replaygain run automatically)
   gbc qa [QUERY]         read-only technical audit + anomaly scan
   gbc anomaly [QUERY]    read-only name/anomaly scan only
+  gbc verify [QUERY]     quarantine imposter tracks (audio != tagged recording) via AcoustID
   gbc convert            normalise formats in the clean lib (WMA->AAC, WAV/AIFF->FLAC; originals->quarantine)
   gbc init [--cron]      deploy config + beets configs (+ optional cron)
   gbc uninstall [--purge] remove tooling (never your music)
@@ -16,7 +17,7 @@ from . import admin
 from . import config as configmod
 from .lock import import_lock
 from .logs import configure
-from .passes import convert, import_, inbox, pipeline, qa
+from .passes import convert, import_, inbox, pipeline, qa, verify
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pq.add_argument("query", nargs="?", default="", help="scope query (default: whole library)")
     pa = sub.add_parser("anomaly", help="read-only name/anomaly scan only")
     pa.add_argument("query", nargs="?", default="", help="scope query (default: whole library)")
+    pv = sub.add_parser("verify", help="quarantine imposter tracks (audio != tagged recording) via AcoustID")
+    pv.add_argument("query", nargs="?", default="", help="scope query (default: whole library)")
     sub.add_parser("convert", help="normalise formats (WMA->AAC, WAV/AIFF->FLAC; originals -> quarantine)")
     pini = sub.add_parser("init", help="deploy config + beets overlays (+ optional cron)")
     pini.add_argument("--cron", action="store_true", help="also schedule `gbc inbox` every 15 min")
@@ -56,6 +59,8 @@ def main(argv=None) -> int:
         return qa.run(cfg, scope=args.query)
     if args.cmd == "anomaly":
         return qa.run_anomaly(cfg, scope=args.query)
+    if args.cmd == "verify":
+        return verify.run(cfg, scope=args.query)
     if args.cmd == "convert":
         with import_lock(cfg, blocking=True):
             return convert.run(cfg)

@@ -42,24 +42,25 @@ stay in `source/` to curate. For other paths, edit `config.env` (created by setu
 ## Commands
 
 ```
-gbc run [--all]         run the pipeline now (import → qa); --all re-audits the whole library
+gbc run [--all]         run the pipeline now (import → verify → qa); --all re-checks the whole library
 gbc inbox               cron door: import a fresh drop if anything is new, then the pipeline
 gbc import [SOURCE]     album-match import only (art/genres/replaygain run automatically)
 gbc qa [QUERY]          read-only technical audit + anomaly scan
 gbc anomaly [QUERY]     read-only name/anomaly scan only
+gbc verify [QUERY]      quarantine imposter tracks (audio ≠ tagged recording) via AcoustID
 gbc convert             normalise formats in the clean lib: WMA→AAC, WAV/AIFF→FLAC (originals → quarantine)
 gbc init [--cron]       (re)deploy config + beets overlays (+ schedule cron)
 gbc uninstall [--purge] remove the tooling (never your music)
 ```
 
-**Incremental by default:** `run`/`inbox` keep a watermark of the last successful run, so qa only audits
-what's new (import is incremental via beets). `--all` re-audits everything; the first run has no watermark
-and covers the whole library.
+**Incremental by default:** `run`/`inbox` keep a watermark of the last successful run, so verify + qa only
+check what's new (import is incremental via beets). `--all` re-checks everything; the first run has no
+watermark and covers the whole library.
 
 ## How it works
 
-`gbc run` = **import → qa** (`library.db` is backed up first). `run` (manual) and `inbox` (cron) call the
-**same** pipeline — only the trigger and scope differ.
+`gbc run` = **import → verify → qa** (`library.db` is backed up first). `run` (manual) and `inbox` (cron)
+call the **same** pipeline — only the trigger and scope differ.
 
 **Import** — per source folder:
 
@@ -74,6 +75,13 @@ and covers the whole library.
    **dedup** before (drop duplicate audio, keep best bitrate) and carries official sidecars
    (booklet/back/scan/`.lrc`) into the album after; empty source shells are pruned. A dup already in clean
    goes to quarantine, never deleted.
+
+**Verify** — re-fingerprints each accepted track and treats it as an **imposter** (a file with the right
+title/duration/tags but whose audio isn't the matched recording) only when AcoustID is conclusive that the
+file has no match *and* the official recording is itself known to AcoustID. A conclusive imposter is **moved
+to quarantine** (`$MUSIC_DUMP`, recoverable, never deleted) and dropped from the lib, so clean stays clean.
+Any rate-limit/timeout → inconclusive, left alone (never acted on); verdicts are cached. (Closes the
+album-mode blind spot: `chroma` gives no penalty to a track it can't identify.)
 
 **QA** (read-only) — format/bitrate, WMA, duplicates, integrity (`beet bad` + ffmpeg decode + RIFF-in-`.mp3`
 detection), junk metadata, and a name/anomaly scan; ends with a conditional **ACTIONS** summary. Overlay:
