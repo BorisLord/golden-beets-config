@@ -1,8 +1,7 @@
 """init / uninstall the tooling. NEVER touches your music (source / clean / quarantine).
 
-init   : create config.env (from the example), make the dirs, deploy beets/*.yaml into BEETSDIR
-         (filling `directory:` and the import `log:` -- written in Python, no fragile sed), optional cron.
-uninstall: remove the cron entry, logs, config.env, and (with --purge) the beets config dir + catalog.
+init: config.env + dirs + deploy beets/*.yaml into BEETSDIR (filling `directory:`/`log:`), optional cron.
+uninstall: remove cron entry, logs, config.env, and (with --purge) the beets config dir + catalog.
 """
 import re
 import shutil
@@ -33,7 +32,7 @@ def init(cfg: Config, cron: bool = False) -> int:
 
     for y in sorted((REPO_ROOT / "beets").glob("*.yaml")):
         text = y.read_text(encoding="utf-8")
-        text = text.replace("@HELPERS@", str(REPO_ROOT / "helpers"))   # convert.yaml -> the wma2opus wrapper
+        text = text.replace("@HELPERS@", str(REPO_ROOT / "helpers"))   # convert.yaml's wma2opus wrapper path
         if y.name == "config.yaml":
             text = re.sub(r"(?m)^directory:.*$", f"directory: {cfg.clean}", text)
             text = re.sub(r"(?m)^  log:.*$", f"  log: {cfg.log_dir}/import-decisions.log", text)
@@ -71,7 +70,7 @@ def uninstall(cfg: Config, purge: bool = False) -> int:
             log.info("removed cron entry")
     if purge:
         bd, home = cfg.beetsdir.resolve(), Path.home().resolve()
-        if bd == Path("/") or bd == home or bd in home.parents:   # root, home, or an ANCESTOR of home -> refuse
+        if bd == Path("/") or bd == home or bd in home.parents:   # refuse root/home/ancestor-of-home
             log.warning("refusing --purge: %s is root/home or an ancestor of home", bd)
         else:
             shutil.rmtree(bd, ignore_errors=True)

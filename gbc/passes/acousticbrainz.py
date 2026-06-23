@@ -1,28 +1,8 @@
-"""Pass -- enrich imported tracks with AcousticBrainz acoustic metadata (BPM, key, moods, danceability...).
+"""Pass -- network-only enrich via the AcousticBrainz read API (BPM, key, moods, danceability...).
 
-AcousticBrainz stopped accepting submissions in 2022, but its database is FROZEN, not gone: the read API
-still serves every recording it ever analysed, keyed by MusicBrainz recording id. Since gbc only keeps
-strongly MB-matched albums, the `mb_trackid` beets assigns is exactly AB's key -> coverage is high (the
-whole sample library returned 100%). So this is a cheap network-only enrichment, no local DSP needed
-(that would be `beets-xtractor` + an Essentia build -- far heavier, for a gain that only matters on
-non-MusicBrainz tracks gbc doesn't keep anyway).
-
-We DON'T use beets' built-in `acousticbrainz` plugin: it is deprecated (logs "This plugin is deprecated
-since AcousticBrainz has shut down") and could vanish from a future beets. Instead we hit the same public
-API ourselves and write a CURATED SUBSET of its canonical field names (ABSCHEME below -- only the useful
-ones: moods, danceability, voice/instrumental, key). `bpm` and `initial_key` are real media fields ->
-written into the file tags by beets' own mediafile (a Subsonic/Navidrome player sees them); the
-moods/danceability classifiers are non-standard -> stored as beets flexible attributes (typed via the
-`types` plugin so `mood_relaxed:0.9..` ranges work). Since beets' mediafile silently skips flex attrs
-on the file side (no tag frame mapping), we additionally inject them as standard custom-tag frames via
-mutagen: TXXX (ID3/MP3), Vorbis comments (FLAC/OGG/Opus), freeform atoms (MP4/M4A). These are the
-official extension mechanisms of each format -- not a hack -- and Navidrome reads them natively when
-configured via `Tags.*.Aliases` in its navidrome.toml.
-
-Frozen source => verdicts are cached forever per recording id (BEETSDIR/gbc-acousticbrainz-cache.json):
-a recording present in AB is fetched once; one confirmed absent (404 / omitted) is never re-queried; a
-network hiccup is left uncached -> retried next run. Best-effort: never gates the pipeline, never moves
-or deletes a file.
+AB is frozen (no submissions since 2022) but its read API still serves every recording it analysed, keyed
+by mb_trackid. We hit it ourselves rather than beets' built-in `acousticbrainz` plugin (deprecated, may
+vanish). Best-effort: never gates the pipeline, never moves/deletes a file.
 """
 import importlib.util
 import json
@@ -46,9 +26,9 @@ BATCH = 25          # AB caps recording_ids at 25 per request
 TIMEOUT = 25
 _UA = "gbc/0.7 (golden-beets-config)"   # default Python-urllib UA can be 403'd/throttled by the public API
 
-# Fields that beets' mediafile does NOT know how to map to file tag frames -> stored as db-only flex
-# attrs (by the in-process bulk apply, _ab_bulk.py). We inject them into the files as standard custom-tag
-# frames (TXXX / Vorbis comments / MP4 freeform atoms) so Navidrome and other media servers can read them.
+# No mediafile tag-frame mapping -> stored as db-only flex attrs, then injected into files as custom-tag
+# frames (TXXX / Vorbis comments / MP4 freeform atoms) so Navidrome can read them. The rest (bpm,
+# initial_key) are native media fields mediafile writes itself.
 FLEX_ATTRS = frozenset({
     "danceable", "key_strength", "tonal",
     "mood_acoustic", "mood_aggressive", "mood_electronic", "mood_happy",
@@ -56,13 +36,10 @@ FLEX_ATTRS = frozenset({
     "moods_mirex", "voice_instrumental",
 })
 
-# Mapping from AB's nested JSON to beets field names. The field NAMES are the canonical ones from beets'
-# (deprecated) beetsplug/acousticbrainz.py (so the ecosystem's queries still apply), but this is a
-# CURATED SUBSET -- only the musically-useful fields: moods, danceability, voice/instrumental, key. We
-# deliberately DROP the noise the plugin also wrote (genre classifiers -- unreliable + owned by
-# MusicBrainz/lastgenre; gender; timbre; ballroom rhythm; chord stats; average_loudness -- redundant with
-# ReplayGain). A leaf "value" takes the classifier's label; an "all" sub-map takes the positive-class
-# PROBABILITY (e.g. mood_happy=0.05); a (attr, idx) tuple composes one field (initial_key = key + scale).
+# AB nested JSON -> beets fields. Field names are beets' canonical ones (from the deprecated
+# beetsplug/acousticbrainz.py, so ecosystem queries still apply) but a CURATED SUBSET: genre/gender/timbre/
+# rhythm/chord/average_loudness noise deliberately dropped (see AGENTS.md). A leaf "value" takes the
+# classifier label; "all" takes the positive-class probability; a (attr, idx) tuple composes one field.
 ABSCHEME = {
     "highlevel": {
         "danceability": {"all": {"danceable": "danceable"}},
@@ -87,7 +64,7 @@ ABSCHEME = {
 
 
 def _walk(data, scheme, out, composites):
-    """Recursively pair leaf nodes of `scheme` with `data` (port of beets' _data_to_scheme_child)."""
+    """Pair leaf nodes of `scheme` with `data` (port of beets' _data_to_scheme_child)."""
     for k, v in scheme.items():
         if k not in data:
             continue
@@ -104,15 +81,14 @@ def _walk(data, scheme, out, composites):
 
 
 def _fields_for(doc: dict) -> dict:
-    """Map one recording's merged low+high-level AB document to {beets_field: value}."""
+    """One recording's merged low+high-level AB document -> {beets_field: value}."""
     out: dict = {}
     composites: dict = defaultdict(list)
     _walk(doc, ABSCHEME, out, composites)
     for attr, parts in composites.items():
         if attr == "initial_key" and len(parts) == 2:
-            # beets' MusicalKey type wants canonical "C", "Cm", "C#", "C#m" -- NOT "F# major": its parser
-            # regex `[\W\s]+major` greedily eats the '#' and mangles "F# major" -> "F" (the deprecated
-            # beets plugin hits this too). Emit the canonical form so the sharp + mode survive.
+            # beets' MusicalKey type wants canonical "C"/"Cm"/"C#"/"C#m", NOT "F# major": its regex
+            # `[\W\s]+major` eats the '#' -> "F". Emit canonical form so the sharp + mode survive.
             root, scale = parts
             out[attr] = root + ("m" if scale.lower().startswith("min") else "")
         else:
@@ -121,11 +97,10 @@ def _fields_for(doc: dict) -> dict:
 
 
 def _fetch(mbids: list[str]):
-    """{mbid: merged_doc} for the mbids AB knows (others omitted). None ONLY on a TRANSIENT failure
-    (timeout / network / 5xx / 429) so the caller retries next run; a 4xx (malformed/absent id) returns the
-    partial result instead, so those ids get cached `None` rather than poisoning the batch on every run."""
+    """{mbid: merged_doc} for the mbids AB knows (others omitted). None ONLY on a transient failure so the
+    caller retries; a 4xx (malformed/absent id) returns the partial result so those ids cache `None`."""
     merged: dict = {}
-    ids = ";".join(urllib.parse.quote(m, safe="") for m in mbids)   # encode each id; ';' stays the AB separator
+    ids = ";".join(urllib.parse.quote(m, safe="") for m in mbids)   # ';' stays the AB separator
     for level in ("low-level", "high-level"):
         req = urllib.request.Request(f"{API}/{level}?recording_ids={ids}", headers={"User-Agent": _UA})
         try:
@@ -133,8 +108,8 @@ def _fetch(mbids: list[str]):
                 data = json.load(r)
         except urllib.error.HTTPError as e:
             if 400 <= e.code < 500:
-                continue                       # 4xx = a malformed/absent id in the batch -> no data this level,
-            return None                        # but NOT transient: skip so absent ids cache `None`, not retry forever
+                continue                       # 4xx = malformed/absent id, not transient: skip so it caches None
+            return None
         except (urllib.error.URLError, ValueError, TimeoutError, OSError):
             return None                        # timeout / network / 5xx / 429 -> transient, retry next run
         for mbid, subs in data.items():
@@ -145,8 +120,8 @@ def _fetch(mbids: list[str]):
 
 
 def _value(field: str, value):
-    """Native value for one field (bpm -> rounded int media field; the rest stay float/str as fetched).
-    A non-numeric bpm (malformed AB doc) falls back to the raw value -- it must never abort the whole batch."""
+    """bpm -> rounded int (media field); rest stay as fetched. A non-numeric bpm falls back to raw rather
+    than aborting the batch."""
     if field == "bpm":
         try:
             return round(float(value))
@@ -156,8 +131,8 @@ def _value(field: str, value):
 
 
 def _beets_python(beet: str) -> str:
-    """Path to the BEETS venv's python (it can `import beets`; gbc's own venv cannot). Read the shebang of
-    the `beet` entry point, then try a sibling python3, then fall back to a bare 'python3'."""
+    """Path to the BEETS venv's python (can `import beets`; gbc's venv cannot). From the `beet` entry-point
+    shebang, then a sibling python3, then bare 'python3'."""
     try:
         path = beet if Path(beet).exists() else (shutil.which(beet) or beet)
         real = Path(path).resolve()
@@ -175,12 +150,11 @@ def _beets_python(beet: str) -> str:
 
 
 def _bulk_apply(cfg: Config, modified: dict, log) -> None:
-    """Apply every {mbid: fields} to the library in ONE beets process via _ab_bulk.py -- replaces one
-    `beet modify` per recording (~N `beet` startups, the pass's real cost). Best-effort: a failure is
-    logged, never raised (the enrichment is already cached and retried next run)."""
+    """Apply all {mbid: fields} in ONE beets process via _ab_bulk.py (vs one `beet modify` per recording --
+    ~N startups, the pass's real cost). Best-effort: failure logged, never raised (already cached)."""
     payload = {m: {k: _value(k, v) for k, v in f.items()} for m, f in modified.items()}
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
-    # per-run temp payload (NOT a fixed filename): two concurrent runs must not clobber each other's JSON
+    # per-run temp name: two concurrent runs must not clobber each other's payload
     fd, tmp = tempfile.mkstemp(dir=cfg.beetsdir, prefix="gbc-ab-modify-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -197,15 +171,10 @@ def _bulk_apply(cfg: Config, modified: dict, log) -> None:
 
 
 def _write_file_tags(path: str, flex_attrs: dict, log) -> bool:
-    """Inject flex attrs as custom tags into one audio file via mutagen.
-
-    ID3  -> TXXX frames (the official ID3v2 extension mechanism for user-defined text)
-    Vorbis -> key=value comments (arbitrary keys allowed by spec)
-    MP4  -> ----:com.apple.itunes:<key> freeform atoms
-
-    Best-effort: any failure is logged and swallowed (never blocks the pipeline)."""
+    """Inject flex attrs as custom tags via mutagen: TXXX (ID3), Vorbis comments, MP4 freeform atoms.
+    Best-effort: failure logged and swallowed (never blocks the pipeline)."""
     ext = path.rsplit(".", 1)[-1].lower()
-    audio: typing.Any = None        # holds a different mutagen type per format branch (FLAC/OggOpus/ID3/MP4)
+    audio: typing.Any = None        # a different mutagen type per format branch
     try:
         if ext in ("flac", "ogg", "opus"):
             if ext == "flac":
@@ -247,8 +216,7 @@ def _write_file_tags(path: str, flex_attrs: dict, log) -> bool:
 
 
 def run(cfg: Config, scope: str = "") -> int:
-    """Enrich tracks added in `scope` (whole library if empty) with AcousticBrainz data. Returns the
-    number of recordings enriched."""
+    """Enrich tracks in `scope` (whole library if empty). Returns the number of recordings enriched."""
     log = get_logger("acousticbrainz")
     sc = [scope] if scope else []
     _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid", "mb_trackid::.", *sc],
@@ -274,13 +242,12 @@ def run(cfg: Config, scope: str = "") -> int:
             continue
         for m in batch:
             doc = docs.get(m)
-            cache[m] = _fields_for(doc) if doc else None   # None = confirmed absent (never re-queried)
+            cache[m] = _fields_for(doc) if doc else None   # None = confirmed absent, never re-queried
         cfg.beetsdir.mkdir(parents=True, exist_ok=True)
         cpath.write_text(json.dumps(cache), encoding="utf-8")
 
-    # NB: cached recordings ARE re-applied every run (not just freshly-fetched ones) -- this is intentional,
-    # so a newly-added item that shares a recording id with an already-cached one still gets enriched. The
-    # incremental watermark keeps `*sc` narrow on normal runs; `--all` deliberately re-applies the whole lib.
+    # Cached recordings are re-applied every run (not just freshly-fetched): a newly-added item sharing a
+    # recording id with a cached one still gets enriched. Watermark keeps `*sc` narrow; `--all` re-applies all.
     enriched = absent = 0
     modified = {}
     for m in mbids:
@@ -290,15 +257,13 @@ def run(cfg: Config, scope: str = "") -> int:
             continue
         modified[m] = fields
         enriched += 1
-    if modified:                               # ONE beets process for the whole batch (not `beet modify` per id)
+    if modified:
         _bulk_apply(cfg, modified, log)
 
-    # Write flex attrs to file tags via mutagen (beets' mediafile only writes native fields).
-    # Uses the official custom-tag mechanism of each format: TXXX (ID3), Vorbis comments, MP4 freeform.
+    # Flex attrs -> file tags via mutagen (mediafile only writes native fields).
     if modified and importlib.util.find_spec("mutagen") is not None:
-        # Reuse the SAME scoped query (not a `mb_trackid:<id>,...` OR of every modified id -- thousands of
-        # them on a full run exceed MAX_ARG_STRLEN (128 KB) for a single argv entry -> execve E2BIG), then
-        # filter the rows to the recordings we just enriched.
+        # Reuse the scoped query (not an `mb_trackid:<id>,...` OR of every id -- thousands exceed
+        # MAX_ARG_STRLEN 128 KB for one argv entry -> execve E2BIG), then filter rows to what we enriched.
         _, paths_text = run_beet(
             cfg, ["ls", "-f", "$mb_trackid\t$path", "mb_trackid::.", *sc],
             passname="acousticbrainz", echo_lines=False)

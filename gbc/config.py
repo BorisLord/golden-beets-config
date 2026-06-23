@@ -1,11 +1,8 @@
-"""Configuration: the SAME variables as the old config.env, parsed in Python.
+"""Config: the config.env shell vars, parsed in Python.
 
-config.env stays shell-syntax (`VAR="${VAR:-default}"`); we evaluate it faithfully by sourcing it
-in a subshell (so its `${VAR:-default}` and any inline env override behave exactly as before), then
-read the effective values back. No config.env -> built-in defaults (identical to config.env.example).
-
-Resolution order for config.env: $GBC_CONFIG, ~/.config/gbc/config.env, <repo>/config.env
-(repo root works for the editable `uv tool install --editable .` install).
+config.env stays shell-syntax (`VAR="${VAR:-default}"`); we source it in a subshell so its `${VAR:-default}`
+and any inline env override behave exactly as in shell. No config.env -> built-in defaults.
+Resolution: $GBC_CONFIG, ~/.config/gbc/config.env, <repo>/config.env (repo root for the editable install).
 """
 import os
 import shutil
@@ -56,14 +53,14 @@ def config_path() -> Path | None:
 
 
 def _source_env(path: Path) -> dict:
-    """Source config.env in bash and read back the effective values (honours ${VAR:-default} + env).
-    RAISES on a sourcing failure -- a typo in config.env must fail loudly, never silently fall back to the
-    built-in ~/Music defaults (this tool MOVES files; operating on the wrong dirs would be dangerous)."""
+    """Source config.env in bash, read back effective values (honours ${VAR:-default} + env). RAISES on a
+    sourcing failure -- a config.env typo must fail loudly, never silently fall back to the built-in defaults
+    (this tool MOVES files; operating on the wrong dirs is dangerous)."""
     bash = shutil.which("bash") or shutil.which("sh")
     if not bash:
         raise RuntimeError(f"no bash/sh available to source {path}")
-    # path passed as $1 (not interpolated) so a weird path can't break out of the script -> no shell injection.
-    # `. "$1" || exit 3`: a source/syntax error in config.env aborts (without it, the later printf still rc=0).
+    # path passed as $1 (not interpolated) -> no shell injection via a weird path.
+    # `. "$1" || exit 3`: a source/syntax error aborts (without it the later printf still returns rc=0).
     script = 'set -a; . "$1" || exit 3; ' + "".join(f'printf "%s\\0" "${v}"; ' for v in _VARS)
     out = subprocess.run([bash, "-c", script, "_", str(path)], capture_output=True, text=True)
     if out.returncode != 0:

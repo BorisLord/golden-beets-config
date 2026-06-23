@@ -50,7 +50,7 @@ gbc anomaly [QUERY]     read-only name/anomaly scan only
 gbc verify [QUERY]      quarantine imposter tracks (audio ≠ tagged recording) via AcoustID
 gbc reclaim             copy-mode: move fully-verified source albums to quarantine (per album, all tracks ok)
 gbc acousticbrainz [QUERY]   fetch BPM/key/mood metadata from AcousticBrainz (network-only; bpm+key → file tags)
-gbc convert             normalise formats in the clean lib: WMA→AAC, WAV/AIFF→FLAC (originals → quarantine)
+gbc convert             normalise formats in the clean lib: WMA→Opus, WAV/AIFF→FLAC, ALAC→FLAC (originals → quarantine)
 gbc init [--cron]       (re)deploy config + beets overlays (+ schedule cron)
 gbc uninstall [--purge] remove the tooling (never your music)
 ```
@@ -69,7 +69,7 @@ the first run has no watermark and covers the whole library.
 |---|---|
 | **import** | AcoustID + MusicBrainz match, scrub, art/genres/ReplayGain; only complete, strong albums are kept |
 | **albumdedup** | same album imported twice (MB vs Discogs) → quarantine the lesser copy. **Runs first**: needs only metadata, so the later passes never process a dropped duplicate |
-| **convert** | WMA → Opus, WAV/AIFF → FLAC, so every later pass operates on the final files |
+| **convert** | WMA → Opus, WAV/AIFF → FLAC, ALAC → FLAC (one universal lossless), so every later pass operates on the final files |
 | **verify** | re-fingerprint each track → quarantine imposters (audio ≠ tagged recording) + log tag mismatches |
 | **acousticbrainz** | add BPM / key / mood / danceable metadata (file tags + db flex attrs) |
 | **qa** | audit + cull corrupt / undecodable files → quarantine |

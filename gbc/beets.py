@@ -1,9 +1,8 @@
-"""Drive beets via subprocess -- the documented, canonical interface.
+"""Drive beets via subprocess -- the canonical interface.
 
-The robustness fix vs the old bash glue: beets writes much of its output (incl. the `--pretend` plan)
-to STDERR, not stdout. Here we MERGE stdout+stderr, log every line (tagged by pass), AND return the full
-text so callers can parse it (e.g. detect the import plan). BEETSDIR is always set in the child env, so
-there is no "variable not propagated" class of bug.
+beets writes much of its output (incl. the `--pretend` plan) to STDERR, so by default we merge stdout+stderr,
+log every line (tagged by pass), and return the full text for callers to parse. BEETSDIR is always set in the
+child env.
 """
 import os
 import subprocess
@@ -14,11 +13,8 @@ from .logs import get_logger
 
 def run_beet(cfg: Config, args, *, overlay: str | None = None, passname: str,
              echo_lines: bool = True, merge_stderr: bool = True) -> tuple[int, str]:
-    """Run `beet [-c overlay] <args...>`. Returns (returncode, merged_output_text).
-
-    echo_lines=True logs every output line (the run narrative: match decisions, fetchart, replaygain).
-    echo_lines=False captures silently -- for `ls`/counts/queries we parse rather than dump to the log.
-    """
+    """Run `beet [-c overlay] <args...>` -> (returncode, merged_output_text).
+    echo_lines=False captures silently (for `ls`/counts/queries we parse rather than dump to the log)."""
     log = get_logger(passname)
     cmd = [cfg.beet]
     if overlay:
@@ -27,15 +23,15 @@ def run_beet(cfg: Config, args, *, overlay: str | None = None, passname: str,
     env = dict(os.environ, BEETSDIR=str(cfg.beetsdir))
     log.info("$ %s", " ".join(cmd))
     lines: list[str] = []
-    # default: merge stderr (beet logs its --pretend plan there). merge_stderr=False keeps stdout CLEAN for
-    # callers that PARSE structured output -- e.g. `beet config` YAML, which beet warnings on stderr corrupt.
+    # merge_stderr=False keeps stdout CLEAN for callers parsing structured output (e.g. `beet config` YAML,
+    # which beet's stderr warnings corrupt).
     err = subprocess.STDOUT if merge_stderr else subprocess.DEVNULL
     try:
-        # errors=surrogateescape: non-UTF-8 file names round-trip identically to reclaim's sqlite BLOB
-        # decode (so verdict keys match), and a stray byte never crashes the capture.
+        # surrogateescape: non-UTF-8 file names round-trip identically to reclaim's sqlite BLOB decode (so
+        # verdict keys match), and a stray byte never crashes the capture.
         with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err,
                               text=True, errors="surrogateescape", bufsize=1, env=env) as proc:
-            assert proc.stdout is not None     # PIPE is always set above
+            assert proc.stdout is not None
             for raw in proc.stdout:
                 line = raw.rstrip("\n")
                 lines.append(line)

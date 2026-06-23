@@ -1,12 +1,10 @@
 """Pass -- per-track AcoustID fingerprint verification: detect & quarantine IMPOSTER tracks.
 
-An imposter is a file with the right title/duration/tags but whose AUDIO is not the matched recording.
-Album-mode import trusts the lot, and `chroma` gives NO penalty to a track it cannot identify at all -> such
-a file slips into an otherwise "strong" album (a real blind spot). We re-fingerprint each accepted track and
-act ONLY when BOTH hold: its own fingerprint matches don't include the tagged recording (AcoustID status=ok)
-AND the official recording (mb_trackid) is itself known to AcoustID. Any rate-limit/timeout ->
-"inconclusive" -> left alone (we never act). A conclusive imposter is MOVED to $MUSIC_DUMP (never deleted)
-and dropped from the lib, so the clean library stays clean. Verdicts are cached per file (checked once).
+An imposter has the right title/duration/tags but its AUDIO is not the matched recording; album-mode import
+trusts the lot and `chroma` gives no penalty to a track it can't identify, so it slips into a "strong" album.
+We act ONLY when BOTH: the file's own fingerprint doesn't match the tagged recording AND that recording is
+known to AcoustID. Inconclusive (rate-limit/timeout) -> left alone. Imposter -> MOVED to $MUSIC_DUMP (never
+deleted) + dropped from the lib. Verdicts cached per file.
 """
 import importlib.util
 import json
@@ -35,26 +33,24 @@ def _acoustid_available() -> bool:
 
 
 def _same_artist(a: str, b: str) -> bool:
-    """True if two artist strings share a primary artist (one normalises into the other). So the SAME song
-    on another release (same artist, different mb_trackid) or a 'feat.' variant is NOT flagged as a wrong
-    tag -- only a genuinely DIFFERENT artist is (e.g. a cover matched to the wrong performer)."""
+    """True if two artist strings share a primary artist (one normalises into the other), so the same song on
+    another release or a 'feat.' variant isn't flagged -- only a genuinely DIFFERENT artist (e.g. a cover)."""
     na, nb = re.sub(r"\W+", "", a.lower()), re.sub(r"\W+", "", b.lower())
     return bool(na) and bool(nb) and (na in nb or nb in na)
 
 
 def _file_verdict(path, mbid):
-    """('ok', present, mismatch) once AcoustID answers conclusively, else ('error', False, None).
-    present=True when the file's OWN fingerprint matches list the tagged recording (mbid) -> genuine. False =>
-    the audio is something else (unknown to AcoustID, or a different known song -> both are imposters if the
-    tagged recording is known). mismatch=(artist, title, score) when the audio instead matches a DIFFERENT
-    recording with high confidence (>= MISMATCH_SCORE) -> the tag is likely wrong (logged only, never acted on)."""
+    """('ok', present, mismatch) once AcoustID answers conclusively, else ('error', False, None). present=True
+    when the file's own fingerprint lists the tagged recording -> genuine; False => audio is something else.
+    mismatch=(artist, title, score) when the audio matches a DIFFERENT recording >= MISMATCH_SCORE (logged
+    only, never acted on)."""
     import acoustid
     for attempt in range(RETRIES):
         try:
             dur, fp = acoustid.fingerprint_file(path)
             resp = acoustid.lookup(APIKEY, fp, dur, meta="recordings")
         except acoustid.FingerprintGenerationError:
-            return "error", False, None                 # can't fingerprint -> inconclusive (never act)
+            return "error", False, None                 # can't fingerprint -> inconclusive
         except acoustid.WebServiceError:
             time.sleep(2 ** attempt)
             continue
@@ -66,10 +62,10 @@ def _file_verdict(path, mbid):
                       for r in results if (r.get("score") or 0) >= MATCH_SCORE
                       for rec in (r.get("recordings") or []))
         mismatch = None
-        if not present:                                 # audio != tag: is it CONFIDENTLY some other known recording?
-            for r in results:                           # AcoustID returns results best-score first
+        if not present:                                 # audio != tag: is it confidently some other known recording?
+            for r in results:                           # results are best-score first
                 if (r.get("score") or 0) < MISMATCH_SCORE:
-                    break                               # sorted desc -> nothing below the bar is worth checking
+                    break                               # sorted desc -> nothing below the bar matters
                 for rec in (r.get("recordings") or []):
                     if rec.get("id") == mbid:
                         continue
@@ -103,15 +99,14 @@ def _official_known(mbid):
 
 
 def _write_verdicts(cfg: Config, verdicts: dict) -> None:
-    """Persist per-ITEM-ID verdicts for the reclaim pass (id, not path: representation-independent, so reclaim
-    can't miss a match on a path-rendering difference). Rewritten EACH run (empty until proven), so a crash or
-    a skipped verify leaves reclaim nothing stale to trust."""
+    """Persist per-item-id verdicts for reclaim (id not path: path-rendering-independent). Rewritten each run
+    (empty until proven), so a crash/skipped verify leaves reclaim nothing stale to trust."""
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
     (cfg.beetsdir / "gbc-verify-verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
 
 
 def run(cfg: Config, scope="") -> int:
-    """Flag imposter tracks among items added in `scope` (whole library if empty). Returns the imposter count."""
+    """Flag imposter tracks among items in `scope` (whole library if empty). Returns the imposter count."""
     log = get_logger("verify")
     _write_verdicts(cfg, {})                                   # fresh slate: reclaim trusts only this run's verdicts
     if not _acoustid_available():
@@ -143,7 +138,6 @@ def run(cfg: Config, scope="") -> int:
             if status != "ok":
                 incon += 1
                 continue                                       # inconclusive -> not cached, retried next run
-            # flag only a genuinely DIFFERENT artist; a same-artist other-recording-id is the same song -> skip
             if mismatch and not _same_artist(mismatch[0], artist):
                 mismatches += 1
                 log.warning("MISMATCH: %s - %s | audio = %s - %s (%.2f) -- kept, tag likely wrong",
@@ -158,8 +152,8 @@ def run(cfg: Config, scope="") -> int:
                 verdict = "imposter" if known else "rare"      # rare = file & official both unknown -> genuine, kept
             cache[key] = verdict
             checked += 1
-        verdicts[itemid] = verdict                             # conclusive verdict keyed by item id -> reclaim input
-        if verdict == "imposter":                              # conclusive imposter -> quarantine (never deleted)
+        verdicts[itemid] = verdict
+        if verdict == "imposter":                              # quarantine, never deleted
             if not backed:
                 backup_db(cfg, "verify", log)
                 backed = True
@@ -170,15 +164,15 @@ def run(cfg: Config, scope="") -> int:
                 i += 1
                 dest = qd / f"{Path(path).stem} ({i}){Path(path).suffix}"
             qd.mkdir(parents=True, exist_ok=True)
-            if safe_move(path, dest, log):                     # move out of clean, then drop the now-stale lib entry
-                run_beet(cfg, ["remove", "-f", f"id:{itemid}"], passname="verify", echo_lines=False)  # exact id
+            if safe_move(path, dest, log):                     # move out of clean, then drop the stale lib entry
+                run_beet(cfg, ["remove", "-f", f"id:{itemid}"], passname="verify", echo_lines=False)
                 moved.append(path)
                 log.info("QUARANTINE imposter (audio != tagged recording): %s -> %s/", Path(path).name, qd)
 
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
     with cpath.open("w", encoding="utf-8") as fh:
         json.dump(cache, fh)
-    _write_verdicts(cfg, verdicts)                             # genuine ("ok") paths drive the reclaim pass
+    _write_verdicts(cfg, verdicts)                             # drives the reclaim pass
     log.info("=== fingerprint verify: %d check(s), %d imposter(s) quarantined, %d mismatch(es), %d inconclusive ===",
              checked, len(moved), mismatches, incon)
     if moved:

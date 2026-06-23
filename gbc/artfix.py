@@ -1,11 +1,9 @@
-"""Pre-import scrub-crash guard -- runs automatically before every import.
+"""Pre-import scrub-crash guard -- runs before every import.
 
-A WMA/ASF file carrying an embedded image with mime_type=None makes beets' `scrub` plugin crash, and a
-single such file aborts the WHOLE `beet import`. This pass scans the source for those files and strips the
-broken image (via mutagen). Removing it is safe: it's junk metadata, and real art is re-fetched by
-`fetchart` during import. SURGICAL -- only WMA that actually carry a mime=None image are written; valid
-art and every other file are left untouched. This is the ONE source write gbc makes even in copy/preserve
-mode (a necessary repair, not a move). Best-effort: missing mediafile/mutagen just skips the guard.
+A WMA/ASF file with an embedded mime_type=None image crashes beets' `scrub` plugin, and one such file aborts
+the WHOLE `beet import`. We strip just the broken image (safe junk metadata; real art is re-fetched by
+`fetchart`). Surgical: only WMA actually carrying a mime=None image are written -- this is the ONE source
+write gbc makes even in copy/preserve mode. Best-effort: missing mediafile/mutagen just skips the guard.
 """
 import importlib.util
 import json
@@ -28,7 +26,7 @@ def _broken_art(path) -> bool:
 
 
 def _strip_wma(path) -> bool:
-    """Remove every embedded picture from a WMA/ASF file via mutagen. Returns True on success."""
+    """Remove every embedded picture from a WMA/ASF file via mutagen."""
     from mutagen.asf import ASF
     try:
         a = ASF(path)
@@ -42,8 +40,7 @@ def _strip_wma(path) -> bool:
 
 def run(cfg: Config, src=None, log=None) -> int:
     """Strip mime=None embedded art from source WMA so scrub can't crash the import. Returns count stripped.
-    Cached by path+mtime+size (BEETSDIR/gbc-artfix-cache.json): a clean WMA is parsed once, never re-parsed
-    while unchanged -- so repeat/cron runs only examine new or modified files, not the whole folder again."""
+    Cached by path+mtime+size (BEETSDIR/gbc-artfix-cache.json) so repeat/cron runs only parse new/modified WMA."""
     log = log or get_logger("artfix")
     root = str(src) if src else str(cfg.src)
     if importlib.util.find_spec("mediafile") is None or importlib.util.find_spec("mutagen") is None:
@@ -66,16 +63,16 @@ def run(cfg: Config, src=None, log=None) -> int:
             except OSError:
                 continue
             key = f"{int(st.st_mtime)}:{st.st_size}:{p}"
-            if key in cache:                       # already examined & unchanged -> skip the costly parse
+            if key in cache:                       # examined & unchanged -> skip the costly parse
                 continue
-            if _broken_art(p):                     # broken -> strip; the file changes, so its key is re-examined
-                if _strip_wma(p):                  #   next run (now clean -> then cached)
+            if _broken_art(p):                     # not cached: stripping changes the file, so its new key
+                if _strip_wma(p):                  #   is re-examined (now clean) and cached next run
                     fixed += 1
                     log.info("artfix: stripped mime=None art -> %s", p)
                 else:
                     failed += 1
             else:
-                cache.add(key)                     # clean WMA, unchanged -> remember, never re-parse it
+                cache.add(key)                     # clean & unchanged -> remember, never re-parse
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
     cpath.write_text(json.dumps(sorted(cache)), encoding="utf-8")
     if fixed or failed:

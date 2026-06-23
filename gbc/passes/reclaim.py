@@ -1,21 +1,12 @@
 """Reclaim verified source originals -- preserve-mode only (beets copy / reflink / hardlink).
 
-After `beet import` COPIED matched albums into clean and `verify` confirmed each track by AcoustID
-fingerprint, a SOURCE album whose every track has a positively-verified ("ok") clean copy is redundant:
-the whole source folder is moved to $MUSIC_DUMP (never deleted). PER-ALBUM only -- a folder is reclaimed
-solely when ALL its audio is accounted for in clean AND every matched track verified ok, so a
-partially-matched or any-track-unverified album stays intact in source for curation.
-
-clean<->source correlation reuses sidecars' proven DURATION-MULTISET match (robust to tag/name rewrites),
-kept strictly BIJECTIVE: a source leaf folder is reclaimed only when it matches exactly ONE clean album
-AND that clean album is matched by exactly ONE source folder. So two duplicate source folders (legitimate
-in copy mode -- dedup is off) that both match the single imported clean copy are BOTH kept (we cannot tell
-which one was copied). A folder with any unreadable track (ffprobe failure -> unmeasurable) is skipped, never
-guessed. Multi-disc / nested / ambiguous folders likewise stay in source.
-
-Verdicts come from the verify pass (BEETSDIR/gbc-verify-verdicts.json), written fresh each run so stale data
-can never trigger a reclaim. verify is watermark-scoped, so reclaim only acts on albums verified THIS run;
-older albums kept earlier are revisited with `gbc run --all` (logged as "unverified-this-run").
+A SOURCE album whose every track has a positively-verified ("ok") clean copy is redundant -> the whole
+folder moves to $MUSIC_DUMP (never deleted). PER-ALBUM and strictly BIJECTIVE: a source folder is reclaimed
+only when it matches exactly ONE clean album AND that album is matched by exactly ONE source folder -- so two
+duplicate source folders (legitimate in copy mode, dedup off) both matching the single clean copy are BOTH
+kept (can't tell which was copied). Any unreadable track (ffprobe failure) or multi-disc/ambiguous folder is
+kept, never guessed. Verdicts from verify (gbc-verify-verdicts.json, fresh each run); verify is watermark-
+scoped, so older albums are revisited with `gbc run --all` (logged "unverified-this-run").
 """
 import json
 import os
@@ -42,7 +33,7 @@ def _source_albums(src: str) -> dict[str, list[int]]:
     out = {}
     for d, paths in by_dir.items():
         ds = durs_of(paths)
-        if ds and len(ds) == len(paths):    # every track measured; a probe failure -> can't fully measure -> skip
+        if ds and len(ds) == len(paths):    # every track measured; any probe failure -> skip the folder
             out[d] = ds
     return out
 
@@ -52,8 +43,8 @@ def _dec(v):
 
 
 def _clean_albums(db: str, clean_root: str) -> dict[str, dict]:
-    """beets items grouped by clean album dir -> {durs, ids, meta=(albumartist, album, year)}. Verdicts are
-    keyed by item id (not path), so reclaim matches verify regardless of path-rendering differences."""
+    """beets items grouped by clean album dir -> {durs, ids, meta=(albumartist, album, year)}. ids (not paths)
+    so reclaim matches verify regardless of path-rendering differences."""
     with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as con:
         rows = con.execute("SELECT id, path, length, albumartist, album, year FROM items").fetchall()
     out: dict[str, dict] = defaultdict(lambda: {"durs": [], "ids": [], "meta": ("", "", "")})
@@ -64,7 +55,7 @@ def _clean_albums(db: str, clean_root: str) -> dict[str, dict]:
         d = out[str(pp.parent)]
         d["durs"].append(round(length or 0))
         d["ids"].append(str(itemid))
-        a, al, y = d["meta"]                            # fill each field from the first NON-EMPTY track value
+        a, al, y = d["meta"]                            # fill each field from the first non-empty track value
         d["meta"] = (a or _dec(albumartist), al or _dec(album), y or _dec(year))
     for v in out.values():
         v["durs"].sort()
@@ -89,10 +80,7 @@ def run(cfg: Config, log=None) -> int:
     clean_albums = _clean_albums(str(cfg.library), str(cfg.clean))
     src_root = str(Path(cfg.src).resolve())
 
-    # Correlate source<->clean by duration-multiset, then keep ONLY bijective pairs: a source album is
-    # reclaimed solely when it matches exactly one clean album AND that clean album is matched by exactly
-    # one source album. Two duplicate source folders (legitimate in copy mode -- dedup is off) match the
-    # single clean copy beets imported -> NEITHER is reclaimed (we cannot tell which one was copied).
+    # Correlate source<->clean by duration-multiset, keep only bijective pairs (see module docstring).
     src_match: dict[str, str] = {}
     clean_hits: dict[str, int] = defaultdict(int)
     moved = kept = ambig = unverified = 0

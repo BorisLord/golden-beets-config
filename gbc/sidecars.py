@@ -1,8 +1,7 @@
-"""Carry an album's OFFICIAL sidecars (booklet/cover/back/scan + .lrc) from the source folder into the
-matched album in the clean library. snapshot BEFORE import (source still has its audio) -> apply AFTER the
-move. Matching is by audio DURATION (robust to tag/name changes): source durations (ffprobe) vs clean album
-lengths in beets' db, tolerant within TOL seconds. A file already in clean, or a redundant cover, is moved
-to quarantine instead -- never deleted. Each function takes a `log` (falls back to the gbc logger).
+"""Carry an album's OFFICIAL sidecars (booklet/cover/back/scan + .lrc) from source into the matched clean
+album. snapshot BEFORE import (source still has audio) -> apply AFTER the move; matched by audio DURATION
+(robust to tag/name changes) within TOL. A file already in clean, or a redundant cover, is quarantined --
+never deleted.
 """
 import json
 import os
@@ -18,7 +17,7 @@ from .logs import get_logger
 
 
 def safe_move(src, dst, log) -> bool:
-    """Move src -> dst; on failure log a clear error and return False (never a raw traceback)."""
+    """Move src -> dst; on failure log a clear error and return False (no raw traceback)."""
     try:
         shutil.move(str(src), str(dst))
     except OSError as e:
@@ -29,10 +28,10 @@ def safe_move(src, dst, log) -> bool:
 AUDIO = {".mp3", ".flac", ".m4a", ".m4b", ".aac", ".alac", ".ogg", ".oga", ".opus", ".wma",
          ".wav", ".aif", ".aiff", ".ape", ".wv", ".mpc", ".tta", ".dsf", ".dff", ".mp2"}
 ART = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".pdf"}
-# official sidecar basenames only (case-insensitive, optional trailing number): cover, booklet, back, cd2...
+# official sidecar basenames only (case-insensitive, optional trailing number)
 OFFICIAL = re.compile(r"^(cover|front|folder|back|booklet|inlay|inside|sleeve|scan|scans|artwork|art|obi"
                       r"|matrix|label|digipak|digipack|cd|disc|disk)([ _.\-]?\d+)?$", re.I)
-TOL = 6   # seconds: per-track tolerance (ffprobe vs beets/mutagen durations differ by a few seconds)
+TOL = 6   # seconds: ffprobe vs beets/mutagen durations differ by a few seconds
 COVER = re.compile(r"^(cover|front|folder|artwork|art|sleeve|label)([ _.\-]?\d+)?$", re.I)  # "the cover" names
 
 
@@ -42,9 +41,8 @@ def _san(s):
 
 
 def quarantine_dir(dump, reason, albumartist="", album="", year="", *, fallback=""):
-    """Canonical $MUSIC_DUMP layout so EVERYTHING quarantined is grouped by WHY + identifiable, mirroring
-    the clean library:  <reason>/<Albumartist>/<Album (Year)>/ . `reason` is the category
-    (imposters / duplicates / reclaimed / redundant-art / shells). Falls back to <reason>/<fallback>
+    """Canonical $MUSIC_DUMP layout, grouped by WHY, mirroring clean: <reason>/<Albumartist>/<Album (Year)>/.
+    `reason` = category (imposters/duplicates/reclaimed/redundant-art/shells). Falls back to <reason>/<fallback>
     when there is no metadata (audio-less shells, untagged files)."""
     base = Path(dump) / reason
     artist = _san(albumartist)
@@ -122,12 +120,12 @@ def apply(snapfile, db, clean_root, dump, do_apply, log=None):
     for (path, length) in rows:
         p = path.decode("utf-8", "surrogateescape") if isinstance(path, bytes) else path
         pp = Path(p)
-        if not pp.is_absolute():                       # beets >=2.10 stores paths relative to the lib root
+        if not pp.is_absolute():                       # beets >=2.10 stores paths relative to lib root
             pp = Path(clean_root) / pp
         dst[pp.parent].append(round(length or 0))
     moved = dumped = miss = ambig = stale = 0
     for ddir, lengths in dst.items():
-        if not ddir.is_dir():           # stale db: clean dir gone (moved/deleted) -> can't carry, skip (no crash)
+        if not ddir.is_dir():           # stale db: clean dir gone -> skip, can't carry (no crash)
             stale += 1
             continue
         dd = sorted(x for x in lengths if x > 0)
@@ -143,11 +141,11 @@ def apply(snapfile, db, clean_root, dump, do_apply, log=None):
                 continue
             dest = ddir / fp.name
             redundant = fp.suffix.lower() in ART and bool(COVER.match(fp.stem)) and has_cover  # cover already there
-            if not redundant and not dest.exists():        # free slot -> MOVE into the album
+            if not redundant and not dest.exists():        # free slot -> move in
                 if not do_apply or safe_move(fp, dest, log):
                     moved += 1
                     log.info("%s %s -> %s", "MOVE" if do_apply else "DRY ", fp.name, ddir)
-            elif dump:                                     # dup / redundant cover -> 'Artist - Album (Year)'/
+            elif dump:                                     # dup / redundant cover -> quarantine
                 qd = quarantine_dir(dump, "redundant-art", ddir.parent.name, ddir.name, fallback=fp.parent.name)
                 if do_apply:
                     qd.mkdir(parents=True, exist_ok=True)
@@ -159,10 +157,9 @@ def apply(snapfile, db, clean_root, dump, do_apply, log=None):
 
 
 def prune_shells(src, dump, do_apply, log=None):
-    """Imported-album shells (source dirs whose ENTIRE subtree has no audio left) -> quarantine, one
-    folder per album. Bottom-up audio scan, then take the TOPMOST audio-empty dir, so a leftover
-    subfolder (Scans/, @eaDir/...) moves WITH its parent shell instead of on its own. Folders that
-    still hold audio (skipped albums) stay in source."""
+    """Imported-album shells (source dirs whose ENTIRE subtree has no audio left) -> quarantine, one folder per
+    album. Bottom-up scan, take the TOPMOST audio-empty dir, so a leftover subfolder (Scans/, @eaDir/...) moves
+    WITH its parent shell. Folders still holding audio (skipped albums) stay in source."""
     log = _log(log)
     src = str(src)
     has_audio = {}
@@ -174,17 +171,17 @@ def prune_shells(src, dump, do_apply, log=None):
         if dp == src or has_audio.get(dp, False) or not (files or dirs):
             continue
         parent = str(Path(dp).parent)
-        if parent == src or has_audio.get(parent, False):   # topmost audio-empty dir -> the album shell
+        if parent == src or has_audio.get(parent, False):   # topmost audio-empty dir = the album shell
             targets.append(dp)
     moved = 0
     for dp in targets:
         dpath = Path(dp)
         if not dpath.is_dir():
             continue
-        dest = quarantine_dir(dump, "shells", fallback=dpath.name)   # no audio -> no metadata, source name
+        dest = quarantine_dir(dump, "shells", fallback=dpath.name)   # no audio -> no metadata, use source name
         if do_apply:
-            dest.mkdir(parents=True, exist_ok=True)  # may already exist (a redundant cover dumped here by apply)
-            for child in dpath.iterdir():            # -> merge the leftovers in, don't spawn a "(2)" sibling
+            dest.mkdir(parents=True, exist_ok=True)  # may already exist (redundant cover dumped here by apply)
+            for child in dpath.iterdir():            # merge leftovers in, don't spawn a "(2)" sibling
                 d = dest / child.name
                 i = 1
                 while d.exists():

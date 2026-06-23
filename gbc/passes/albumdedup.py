@@ -1,12 +1,8 @@
-"""Pass -- de-duplicate ALBUMS in the CLEAN library.
-
-The same album imported twice from two source copies can be matched to two DIFFERENT releases (e.g. one
-MusicBrainz, one Discogs) -> different mb_albumid + a slightly different title -> beets' own
-duplicate_action (keyed on mb_albumid) never sees them as duplicates and keeps both. We correlate albums by
-CONTENT -- same albumartist + the same track-duration multiset (the technique sidecars/reclaim already use)
--- keep the best copy (MusicBrainz over Discogs, then best bitrate) and move the rest to
-quarantine/duplicates (NEVER deleted; library.db backed up first). Runs in BOTH import modes (the
-source-side dedup in dedup.py is within-folder, track-level, move-mode only -- it cannot see this).
+"""Pass -- de-duplicate ALBUMS in the CLEAN library. The same album imported twice can match two DIFFERENT
+releases (MusicBrainz vs Discogs) -> different mb_albumid, so beets' mb_albumid-keyed duplicate_action keeps
+both. We correlate by CONTENT (same albumartist + track-duration multiset), keep the best copy (MusicBrainz >
+Discogs, then bitrate), quarantine the rest -- NEVER deleted; library.db backed up first. Runs in BOTH import
+modes (dedup.py is within-folder, track-level, move-mode only -- it cannot see this).
 """
 import re
 from collections import defaultdict
@@ -19,35 +15,32 @@ from ..sidecars import quarantine_dir, safe_move
 from ..util import backup_db
 
 SEP = "\x1f"
-MINTRACKS = 3   # >=3 tracks: same artist + same count + all tracks within TOL between DISTINCT albums is ~nil
-TOL = 35        # seconds/track: a different rip/master of the SAME album drifts up to ~30s/track (measured:
-                # IAM 30, BBC Sessions 22, De Palmas 14); a DIFFERENT album differs far more (Deep Purple vs in
-                # Rock: 136s/track). Per-track (not total -> a different album can share the same total).
+MINTRACKS = 3   # >=3: same artist + count + all within TOL between DISTINCT albums is ~nil
+TOL = 35        # seconds/track: same album, different rip drifts ~30s/track (measured IAM 30, BBC 22, De
+                # Palmas 14); a different album far more (Deep Purple vs in Rock 136). Per-track, not total
+                # (different albums can share a total).
 _NUMWORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
              "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12",
              "ii": "2", "iii": "3", "iv": "4", "vi": "6", "vii": "7", "viii": "8", "ix": "9"}
 
 
 def _match(durs_a, durs_b) -> bool:
-    """Same track count and every (sorted) track within TOL -> the same album, tolerant to a different rip."""
+    """Same count + every (sorted) track within TOL -> same album, tolerant to a different rip."""
     return len(durs_a) == len(durs_b) and all(
         abs(x - y) <= TOL for x, y in zip(sorted(durs_a), sorted(durs_b), strict=True))
 
 
 def _numbers(title: str) -> set:
-    """Distinguishing volume/number tokens of a title: digits + ordinal words + multi-char roman numerals.
-    Two titles that differ here are DIFFERENT releases (Nova Classics Four vs Seven, Vol. 1 vs 2, Greatest
-    Hits vs Hits II) even when their tracks happen to align -- they must NOT merge."""
+    """Distinguishing volume/number tokens (digits + ordinal words + roman numerals). Titles differing here
+    are DIFFERENT releases (Nova Classics Four vs Seven, Vol. 1 vs 2) even if tracks align -- must NOT merge."""
     nums = set(re.findall(r"\d+", title))
     nums |= {_NUMWORDS[w] for w in re.findall(r"[a-z]+", title.lower()) if w in _NUMWORDS}
     return nums
 
 
 def _title_close(t1: str, t2: str) -> bool:
-    """Same album title: >= 0.5 token overlap AND the same distinguishing numbers. A casing/punctuation
-    variant of the SAME album merges (Dark Side of the Moon / The Dark Side of the Moon); a DIFFERENT album
-    (Beatles 'Help!' vs 'Beatles for Sale' -> 0 overlap) or a different volume/edition (Nova Classics Four vs
-    Seven -> different numbers) does NOT, which a duration-only match would wrongly merge."""
+    """Same album title: >=0.5 token overlap AND same distinguishing numbers -- so a casing/punctuation variant
+    merges but a different album or volume/edition does NOT (a duration-only match would wrongly merge them)."""
     a = set(re.sub(r"[^a-z0-9]+", " ", t1.lower()).split())
     b = set(re.sub(r"[^a-z0-9]+", " ", t2.lower()).split())
     if not a or not b or len(a & b) / max(len(a), len(b)) < 0.5:
@@ -94,8 +87,8 @@ def run(cfg: Config, *, do_apply: bool = True) -> int:
         digits = re.sub(r"\D", "", bitrate)
         a["br"] = max(a["br"], int(digits) if digits else 0)
 
-    # bucket by (artist, track count), then cluster within a bucket by TOLERANT duration match -- an exact
-    # duration-multiset misses the SAME album ripped differently (a few seconds of drift per track).
+    # bucket by (artist, track count), cluster by TOLERANT duration match -- an exact multiset misses the
+    # same album ripped differently (a few seconds drift per track).
     buckets: dict = defaultdict(list)
     for aid, a in albums.items():
         if len(a["durs"]) >= MINTRACKS and sum(a["durs"]) > 0:
@@ -121,7 +114,7 @@ def run(cfg: Config, *, do_apply: bool = True) -> int:
 
     moved = 0
     for aids in dup_groups:
-        # keeper: MusicBrainz over Discogs, then best bitrate, then lowest album id (deterministic)
+        # keeper: MusicBrainz > Discogs, then bitrate, then lowest id (deterministic)
         keeper = max(aids, key=lambda i: (_is_mb(albums[i]["mb"]), albums[i]["br"], -int(i)))
         for aid in aids:
             if aid == keeper:

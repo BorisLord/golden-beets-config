@@ -1,13 +1,9 @@
-"""Read beets' RESOLVED import config and derive how gbc must adapt -- gbc respects beets on every point:
-the import OPERATION (move / copy / link / hardlink / reflink / delete) is beets' decision, not gbc's.
-
-`beet config` prints the fully merged config (beets defaults + config.yaml + overlays) as YAML, so this is
-the EFFECTIVE behaviour, never a guess from the file. From it we derive two booleans the passes branch on:
+"""Read beets' RESOLVED import op and derive how gbc adapts -- the op (move/copy/link/hardlink/reflink/delete)
+is beets' call, not gbc's. `beet config` prints the merged YAML (defaults + config.yaml + overlays) = the
+EFFECTIVE behaviour, never a guess. From it we derive two booleans the passes branch on:
   source_consumed   -- beets removes the originals (move, or delete after copy/link) -> gbc MAY move source.
-  clean_independent -- clean holds a real standalone copy (copy / reflink / hardlink, NOT symlink/in-place)
-                       -> reclaiming a verified source original is safe.
-When the source is PRESERVED, gbc keeps it READ-ONLY (no dedup / sidecars / prune); the reclaim pass
-(post-verify) is the only thing allowed to move a source original, and only when clean_independent.
+  clean_independent -- clean holds a real standalone copy (copy/reflink/hardlink, NOT symlink/in-place) ->
+                       reclaiming a verified source original is safe.
 """
 import io
 from dataclasses import dataclass
@@ -18,7 +14,7 @@ from .beets import run_beet
 from .config import Config
 from .logs import get_logger
 
-REQUIRED_PLUGINS = ("musicbrainz", "chroma", "scrub")  # match candidates / tag hygiene gbc depends on
+REQUIRED_PLUGINS = ("musicbrainz", "chroma", "scrub")  # gbc depends on these for match candidates + scrub
 
 
 def _as_bool(v) -> bool:
@@ -28,7 +24,7 @@ def _as_bool(v) -> bool:
 
 
 def _reflink_on(v) -> bool:
-    # beets accepts reflink: yes | no | auto (auto = reflink if the FS supports it, else copy) -> treat auto as on
+    # beets reflink: yes|no|auto (auto = reflink if FS supports it, else copy) -> treat auto as on
     return _as_bool(v) or str(v).strip().lower() == "auto"
 
 
@@ -104,7 +100,7 @@ def _warn_missing_plugins(config_text: str, log) -> None:
 def read_import(cfg: Config) -> BeetsImport:
     """`beet config` (resolved) -> the effective import op; warns if a plugin gbc depends on is absent."""
     log = get_logger("beetscfg")
-    # stdout-only: beet's stderr warnings (e.g. deprecations) would otherwise corrupt the YAML we parse
+    # merge_stderr=False: beet's stderr warnings would corrupt the YAML we parse
     _, text = run_beet(cfg, ["config"], passname="beetscfg", echo_lines=False, merge_stderr=False)
     _warn_missing_plugins(text, log)
     bi = parse_import(text)

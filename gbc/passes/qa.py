@@ -1,7 +1,5 @@
-"""Pass 4 -- technical QA (READ-ONLY audit; ends with a conditional ACTIONS summary).
-Sections logged to gbc.log. `scope` (a beets query, e.g.
-`added:<watermark>..`) narrows the audit to recent additions; empty scope = whole library.
-"""
+"""Pass 4 -- technical QA: READ-ONLY audit -> conditional ACTIONS summary. `scope` (a beets query) narrows
+to recent additions; empty = whole library."""
 import re
 import shutil
 import subprocess
@@ -42,9 +40,8 @@ def _bucket(b):
 
 
 def _container_mismatch(path):
-    """Short reason if a file's magic bytes contradict its audio extension (e.g. RIFF/WAVE data in a .mp3),
-    else ''. Such files read fine in mediafile but carry EMPTY tags in TagLib -> break Navidrome/Jellyfin;
-    mp3val only WARNS and exits 0, so the integrity check misses them. The magic bytes don't lie."""
+    """Reason if magic bytes contradict the audio extension (RIFF/WAVE in a .mp3), else ''. Such files read in
+    mediafile but carry EMPTY tags in TagLib -> break Navidrome/Jellyfin; mp3val only warns + exits 0."""
     try:
         with Path(path).open("rb") as fh:
             head = fh.read(12)
@@ -54,9 +51,9 @@ def _container_mismatch(path):
         return "empty file"
     ext = Path(path).suffix.lower()
     ogg = head[:4] == b"OggS"
-    sig = {  # ext -> True when the leading bytes match what the extension claims
+    sig = {  # ext -> True when leading bytes match the claimed extension
         ".mp3": head[:3] == b"ID3" or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0),
-        ".flac": head[:4] == b"fLaC" or head[:3] == b"ID3",   # some rippers prepend an ID3v2 tag to a valid FLAC
+        ".flac": head[:4] == b"fLaC" or head[:3] == b"ID3",   # some rippers prepend an ID3v2 tag to valid FLAC
         ".ogg": ogg, ".oga": ogg, ".opus": ogg,
         ".m4a": head[4:8] == b"ftyp", ".m4b": head[4:8] == b"ftyp",
     }
@@ -66,8 +63,8 @@ def _container_mismatch(path):
 
 
 def _cull(cfg: Config, paths, log) -> int:
-    """Move corrupt clean files to quarantine/corrupt/<Albumartist>/<Album (Year)>/ (never deleted) and drop
-    the lib entry, so clean stays playable. Identity derived from the clean path (already sanitised)."""
+    """Move corrupt clean files to quarantine/corrupt/ (never deleted) and drop the lib entry. Identity from
+    the clean path (already sanitised)."""
     backup_db(cfg, "qa-cull", log)
     moved = 0
     for p in dict.fromkeys(paths):                 # dedupe, keep order
@@ -101,13 +98,13 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
     for fmt, n in fc.most_common():
         log.info("  %5d %s", n, fmt)
 
-    # 2. bitrate breakdown ($bitrate is "Nkbps" -> leading number)
+    # 2. bitrate ($bitrate is "Nkbps" -> leading number)
     buckets = Counter(_bucket(_leadnum(b)) for b in _lines(cfg, ["ls", "-f", "$bitrate", *sc]))
     log.info("=== 2. bitrate ===")
     for label in sorted(buckets):
         log.info("  %-22s %d", label, buckets[label])
 
-    # 3. WMA (stored as 'Windows Media' -> query format::Windows, NOT WMA)
+    # 3. WMA stored as 'Windows Media' -> query format::Windows, NOT WMA
     wma = len(_lines(cfg, ["ls", "format::Windows", *sc]))
     log.info("=== 3. WMA: %d track(s) ===", wma)
     for x in sorted(set(_lines(cfg, ["ls", "-f", "$albumartist - $album", "format::Windows", *sc])))[:15]:
@@ -126,9 +123,9 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
     for x in dups[:40]:
         log.info("  %s", x)
 
-    # 6. integrity: beet bad + ffmpeg decode of other formats. Count the per-FILE marker badfiles itself
-    #    prints ("<path>: checker exited with status N", or "file does not exist") -- flac --test and mp3val
-    #    emit DIFFERENT error text ("ERROR while decoding" vs "ERROR:"), so matching "ERROR:" missed flac.
+    # 6. integrity: beet bad + ffmpeg decode. Match the per-FILE marker badfiles prints ("checker exited with
+    #    status N" / "file does not exist") -- flac --test and mp3val emit DIFFERENT error text, so "ERROR:"
+    #    alone missed flac.
     bad = _lines(cfg, ["bad", *sc])
     fail = [x for x in bad if "checker exited with status" in x or "file does not exist" in x]
     baderr = len(fail)
@@ -146,9 +143,8 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
         for p in paths:
             if Path(p).suffix.lower() in (".mp3", ".flac"):
                 continue
-            # -xerror aborts + exits nonzero on the first decode error (catches mid-file corruption too); gate
-            # on the RETURN CODE, not stderr -- valid-but-exotic files (ape/wv/dsf) emit harmless error-level
-            # noise that must NOT get a real file culled to quarantine.
+            # Gate on the RETURN CODE, not stderr: valid-but-exotic files (ape/wv/dsf) emit harmless error-level
+            # noise. -xerror aborts + exits nonzero on the first decode error (catches mid-file corruption too).
             res = subprocess.run(["ffmpeg", "-nostdin", "-xerror", "-v", "error", "-i", p, "-f", "null", "-"],
                                  capture_output=True, text=True)
             if res.returncode != 0:
@@ -157,8 +153,7 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
                 log.info("  BAD (rc=%d): %s", res.returncode, p)
     log.info("=== 6b. other-format decode: %d bad ===", other_bad)
 
-    # 6c. container vs extension mismatch (magic bytes) -- a RIFF/WAVE file named .mp3 reads in mediafile
-    #     but breaks TagLib/Navidrome; mp3val warns yet exits 0, so 6/6b miss it. The bytes don't lie.
+    # 6c. container vs extension mismatch (magic bytes) -- 6/6b miss it (see _container_mismatch)
     mism = [(p, why) for p in paths if (why := _container_mismatch(p))]
     log.info("=== 6c. container/extension mismatch: %d ===", len(mism))
     for p, why in mism:
@@ -172,7 +167,7 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
     enc = len(_lines(cfg, ["ls", "encoder::.", *sc]))
     log.info("=== 7. junk metadata: %d junk comment(s), %d encoder noise ===", cmt, enc)
 
-    # 8. name/title anomalies -> TSV per family
+    # 8. name/title anomalies
     fields = ("$id@@@$albumartist@@@$artist@@@$album@@@$title@@@$length@@@$bitrate"
               "@@@$singleton@@@$comp@@@$albumtype@@@$mb_trackid")
     _, tsv_text = run_beet(cfg, ["ls", "-f", fields, *sc], overlay="qa.yaml", passname="qa", echo_lines=False)
@@ -183,7 +178,6 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
     counts = anomaly.scan(str(tsv), str(workdir), log)
     anom = sum(counts.values())
 
-    # ACTIONS (only what was found)
     log.info("=== ACTIONS (only what was found; BACK UP library.db before any zero/dedup) ===")
     actions = []
     if low:
@@ -213,7 +207,7 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
 
 
 def run_anomaly(cfg: Config, scope: str = "") -> int:
-    """Just the read-only name/anomaly scan (section 8), standalone."""
+    """Read-only name/anomaly scan (section 8), standalone."""
     log = get_logger("anomaly")
     sc = [scope] if scope else []
     fields = ("$id@@@$albumartist@@@$artist@@@$album@@@$title@@@$length@@@$bitrate"

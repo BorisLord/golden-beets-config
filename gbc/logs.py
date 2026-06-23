@@ -1,7 +1,5 @@
-"""ONE log for everything. Single file `logs/gbc.log`, append-only, every line tagged with the
-pass and a run id -- identical whether the door was `run` (manual) or `inbox` (cron). No per-pass files
-(separating identical logs is the bug we removed). beets' own import-decisions.log stays separate (it is
-a different, native content).
+"""ONE log: `logs/gbc.log`, append-only, every line tagged `[pass]` + run id. No per-pass files
+(separating identical logs was a bug). beets' own import-decisions.log stays separate.
 
     2026-06-17 08:12:03  run=2a9f  [import]  INFO  ...
 """
@@ -23,7 +21,7 @@ class _ContextFilter(logging.Filter):
 
 
 def configure(log_dir: Path, run_id: str, *, console: bool = True, level: int = logging.INFO) -> logging.Logger:
-    """Set up the single logger once. Safe to call again (updates the run id only)."""
+    """Configure once; safe to recall (updates run id only)."""
     global _configured
     _run_id.set(run_id)
     logger = logging.getLogger("gbc")
@@ -49,5 +47,4 @@ def configure(log_dir: Path, run_id: str, *, console: bool = True, level: int = 
 
 
 def get_logger(passname: str) -> logging.LoggerAdapter:
-    """A logger whose every line is tagged `[passname]`."""
     return logging.LoggerAdapter(logging.getLogger("gbc"), {"passname": passname})

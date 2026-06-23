@@ -1,17 +1,4 @@
-"""gbc CLI -- one tool, several doors. beets does art/genres/replaygain/scrub natively during import.
-
-  gbc run [--all] [--reimport]  full pipeline (import -> qa); --reimport re-tries already-seen folders
-  gbc inbox              cron door: import a drop if anything is new, then the pipeline
-  gbc import [SOURCE] [--reimport]  album-match import only (--reimport re-tries already-seen folders)
-  gbc qa [QUERY]         read-only technical audit + anomaly scan
-  gbc anomaly [QUERY]    read-only name/anomaly scan only
-  gbc verify [QUERY]     quarantine imposter tracks (audio != tagged recording) via AcoustID
-  gbc reclaim            copy-mode: move fully-verified source albums to quarantine (per album)
-  gbc acousticbrainz [QUERY]  fetch BPM/key/mood metadata from AcousticBrainz (network-only)
-  gbc convert            normalise formats in the clean lib (WMA->AAC, WAV/AIFF->FLAC; originals->quarantine)
-  gbc init [--cron]      deploy config + beets configs (+ optional cron)
-  gbc uninstall [--purge] remove tooling (never your music)
-"""
+"""gbc CLI -- one tool, several doors. beets does art/genres/replaygain/scrub natively during import."""
 import argparse
 import secrets
 

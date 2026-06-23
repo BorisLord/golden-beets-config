@@ -1,20 +1,19 @@
-"""QA -- anomaly / name scanner for the clean album library. READ-ONLY.
+"""QA anomaly / name scanner for the clean album library. READ-ONLY; writes one TSV per family, logs counts.
 
-Input TSV (one '@@@'-delimited row per track), produced READ-ONLY by beets (11 @@@-fields):
+Input TSV (one '@@@'-delimited row per track), produced by beets (11 @@@-fields):
   $id@@@$albumartist@@@$artist@@@$album@@@$title@@@$length@@@$bitrate@@@$singleton@@@$comp@@@$albumtype@@@$mb_trackid
 
-Detects the anomaly families found in practice (each needs human + MB verification before fixing):
-  1 artist_variant   - same artist, different albumartist spelling (case/accent/hyphen/punct/quote)
-  2 feat_albumartist - albumartist carries 'feat. X' -> track torn out of its album/base folder
-  3 album_variant    - same album under several names (year/disc/punct/case) -> split folders
-  4 loose_dup        - a singleton whose own album = a matched complete album (dup of an album track)
-  5 orphan           - singleton with no album tag
-  6 junk_album       - album is a URL/spam, equals the artist name, or 'unknown/inconnu/timestamp'
-  7 intra_album_dup  - same (albumartist, album) has the same title twice (~same duration)
-  8 disc_in_name     - the disc number is baked into the album name ('- cd2', '(1 of 2)', 'Disc 3')
-Writes one TSV per family in <workdir>/ and logs counts. Fixes are applied later, with review.
+Families (each needs human + MB verification before fixing):
+  artist_variant   - same artist, different albumartist spelling (case/accent/hyphen/punct/quote)
+  feat_albumartist - albumartist carries 'feat. X' -> track torn out of its album/base folder
+  album_variant    - same album under several names (year/disc/punct/case) -> split folders
+  loose_dup        - singleton whose own album = a matched complete album (dup of an album track)
+  orphan           - singleton with no album tag
+  junk_album       - album is URL/spam, equals the artist name, or 'unknown/inconnu/timestamp'
+  intra_album_dup  - same (albumartist, album) has the same title twice (~same duration)
+  disc_in_name     - disc number baked into the album name ('- cd2', '(1 of 2)', 'Disc 3')
 """
-# This module deliberately matches ambiguous unicode punctuation (en-dashes, curly quotes), so RUF001 off.
+# Deliberately matches ambiguous unicode punctuation (en-dashes, curly quotes) -> RUF001 off.
 # ruff: noqa: RUF001
 import csv
 import re
@@ -45,13 +44,13 @@ def norm(s):
     s = strip_accents(s).lower()
     s = re.sub(r"[‐‑‒–—―]", "-", s)
     s = re.sub(r"[’‘`´]", "'", s)
-    s = re.sub(r"\s+(and|et|&|\+)\s+", " ", s)   # unify separators: '&' / 'and' / ',' / '+'
-    s = re.sub(r"[^a-z0-9'-]+", " ", s)           # drop &/,/+/.../slash -> space
+    s = re.sub(r"\s+(and|et|&|\+)\s+", " ", s)   # unify separators &/and/et/+
+    s = re.sub(r"[^a-z0-9'-]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
 def normbase(s):
-    """album name without year / disc / edition parentheticals, for variant grouping."""
+    """Album name without year/disc/edition parentheticals, for variant grouping."""
     s = s or ""
     prev = None
     while prev != s:
@@ -94,7 +93,7 @@ def scan(dump, workdir, log=None):
     def spellings(v):
         return " || ".join(f"{a}={n}" for a, n in sorted(v.items(), key=lambda x: -x[1]))
 
-    # 1 artist_variant
+    # artist_variant
     aa_groups = defaultdict(lambda: defaultdict(int))
     for r in rows:
         if r["albumartist"].strip() and not FEAT.search(r["albumartist"]):
@@ -103,7 +102,7 @@ def scan(dump, workdir, log=None):
         if len(v) > 1 and k:
             cats["artist_variant"].append([k, spellings(v)])
 
-    # 3 album_variant (group by albumartist + normbase album)
+    # album_variant: group by albumartist + normbase album
     alb_groups = defaultdict(lambda: defaultdict(int))
     for r in rows:
         if r["album"].strip():
@@ -112,7 +111,7 @@ def scan(dump, workdir, log=None):
         if len(v) > 1 and base:
             cats["album_variant"].append([aa, base, spellings(v)])
 
-    # 7 intra_album_dup (same raw album, same title twice ~same length)
+    # intra_album_dup: same raw album, same title twice, ~same length
     seen = defaultdict(list)
     for r in rows:
         if r["album"].strip():
@@ -123,7 +122,7 @@ def scan(dump, workdir, log=None):
             if len(ss) < 2 or (max(ss) - min(ss) <= 5):
                 cats["intra_album_dup"].append([aa, alb, t, "; ".join(f"{i}({b})" for i, _, b in items)])
 
-    # per-item families
+    # per-item families: feat_albumartist, junk_album, disc_in_name, orphan, loose_dup
     for r in rows:
         alb, aa = r["album"].strip(), r["albumartist"].strip()
         if FEAT.search(aa):
