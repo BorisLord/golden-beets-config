@@ -26,10 +26,52 @@ class TestConvert(Base):
         self.assertEqual(len(convs), 1)                                     # stopped after the first failure
 
     def test_successful_convert_returns_zero(self):
-        counts = iter([1, 1, 0, 0])     # 2 jobs pending (comprehension), then 0 remain after each convert
+        counts = iter([1, 1, 1, 0, 0, 0])   # 3 jobs pending (comprehension), then 0 remain after each convert
         p1, p2, p3 = self._patches(lambda *a, **k: next(counts), lambda cfg, args, **k: (0, ""))
         with p1, p2, p3:
             self.assertEqual(convert.run(self.cfg), 0)
+
+    def test_failed_encode_reaps_stale_row(self):
+        # a WMA still matching the query AFTER convert but whose file vanished = failed encode (keep_new moved
+        # the original to quarantine, the encode errored) -> the stale db row must be dropped by exact id
+        calls = []
+
+        def count(cfg, args, passname):
+            return 1 if "format::Windows" in args else 0
+
+        def run_beet(cfg, args, **k):
+            calls.append(args)
+            if args and args[0] == "ls" and any("$id" in str(a) for a in args):
+                return (0, "42\t/gone/x.wma")      # the still-matching item; its file does NOT exist
+            return (0, "")
+
+        with mock.patch.object(convert, "count_items", count), \
+             mock.patch.object(convert, "run_beet", run_beet), \
+             mock.patch.object(convert, "backup_db", lambda *a, **k: None):
+            self.assertEqual(convert.run(self.cfg), 0)
+        removes = [a for a in calls if a and a[0] == "remove"]
+        self.assertEqual(len(removes), 1)
+        self.assertIn("id:42", removes[0])         # stale row reaped (original is safe in quarantine)
+
+    def test_alac_job_converts_to_flac(self):
+        # only ALAC items present -> exactly one convert, to flac, querying format:ALAC
+        calls = []
+
+        def count(cfg, args, passname):
+            return 1 if "format:ALAC" in args else 0
+
+        def run_beet(cfg, args, **k):
+            calls.append(args)
+            return (0, "")
+
+        with mock.patch.object(convert, "count_items", count), \
+             mock.patch.object(convert, "run_beet", run_beet), \
+             mock.patch.object(convert, "backup_db", lambda *a, **k: None):
+            self.assertEqual(convert.run(self.cfg), 0)
+        conv = [a for a in calls if a and a[0] == "convert"]
+        self.assertEqual(len(conv), 1)
+        self.assertIn("flac", conv[0])            # lossless -> FLAC
+        self.assertIn("format:ALAC", conv[0])
 
 
 if __name__ == "__main__":
