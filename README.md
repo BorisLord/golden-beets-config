@@ -31,7 +31,7 @@ value. The `gbc` CLI adds the rest (below).
 ```bash
 git clone <repo-url> && cd golden-beets-config
 ./setup.sh     # checks deps, installs beets + the gbc CLI (via uv), deploys the config (+ optional cron)
-gbc run        # run the pipeline: import → verify → acousticbrainz → qa → reclaim
+gbc run        # run the pipeline: import → albumdedup → convert → verify → acousticbrainz → qa → reclaim
 ```
 
 No config needed: by default everything lives under `~/Music/beetsPipeline/` (`source/`, `clean/`,
@@ -42,7 +42,7 @@ No config needed: by default everything lives under `~/Music/beetsPipeline/` (`s
 ## Commands
 
 ```
-gbc run [--all] [--reimport]   pipeline now (import → verify → acousticbrainz → qa → reclaim); --all re-checks all, --reimport re-tries seen folders
+gbc run [--all] [--reimport]   pipeline now (import → albumdedup → convert → verify → acousticbrainz → qa → reclaim); --all re-checks all, --reimport re-tries seen folders
 gbc inbox               cron door: import a fresh drop if anything is new, then the pipeline
 gbc import [SOURCE] [--reimport]   album-match import only (--reimport re-tries already-seen folders)
 gbc qa [QUERY]          read-only technical audit + anomaly scan
@@ -61,8 +61,22 @@ the first run has no watermark and covers the whole library.
 
 ## How it works
 
-`gbc run` = **import → verify → acousticbrainz → qa → reclaim** (`library.db` is backed up first). `run`
-(manual) and `inbox` (cron) call the **same** pipeline — only the trigger and scope differ.
+`gbc run` runs the **same pipeline**, in this order:
+
+    import  →  albumdedup  →  convert  →  verify  →  acousticbrainz  →  qa  →  reclaim
+
+| pass | what it does |
+|---|---|
+| **import** | AcoustID + MusicBrainz match, scrub, art/genres/ReplayGain; only complete, strong albums are kept |
+| **albumdedup** | same album imported twice (MB vs Discogs) → quarantine the lesser copy. **Runs first**: needs only metadata, so the later passes never process a dropped duplicate |
+| **convert** | WMA → Opus, WAV/AIFF → FLAC, so every later pass operates on the final files |
+| **verify** | re-fingerprint each track → quarantine imposters (audio ≠ tagged recording) + log tag mismatches |
+| **acousticbrainz** | add BPM / key / mood / danceable metadata (file tags + db flex attrs) |
+| **qa** | audit + cull corrupt / undecodable files → quarantine |
+| **reclaim** | copy-mode only: drain a source album to quarantine once every track is verified `ok` |
+
+`library.db` is backed up before any file-moving pass. `run` (manual) and `inbox` (cron) call this same
+pipeline — only the trigger and scope differ.
 
 **gbc follows the beets import op.** Whether the source is consumed or kept is beets' `import.move`/`copy`
 decision, read from `beet config` — gbc adapts (`gbc/beetscfg.py`):

@@ -1,6 +1,7 @@
-"""The pipeline: import -> convert -> verify -> acousticbrainz -> qa -> albumdedup -> reclaim. `run` + `inbox`
-(cron) both call this; only the trigger differs. convert runs BEFORE verify so every later pass operates
-identically on the converted (WMA->AAC, WAV/AIFF->FLAC) files, not the originals.
+"""The pipeline: import -> albumdedup -> convert -> verify -> acousticbrainz -> qa -> reclaim. `run` + `inbox`
+(cron) both call this; only the trigger differs. albumdedup runs FIRST (it needs only import metadata) so the
+later, expensive passes never process a duplicate album that gets quarantined anyway. convert runs BEFORE
+verify so every later pass operates identically on the converted (WMA->Opus, WAV/AIFF->FLAC) files.
 
 beets does the heavy lifting natively DURING `beet import` (auto: yes): match, scrub, fetchart, embedart,
 lastgenre, ftintitle, replaygain. The import pass adds dedup (before) + sidecars (after) IN MOVE MODE; verify
@@ -28,7 +29,11 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False) ->
         log.error("pipeline ABORTED: import failed (rc=%d) -- watermark NOT advanced, will retry next run", rc)
         return rc
     try:
-        convert.run(cfg)                     # normalise WMA->AAC, WAV/AIFF->FLAC BEFORE verify so every later
+        albumdedup.run(cfg)                  # cross-source duplicate albums (MB vs Discogs) -> quarantine the
+    except Exception:                        # lesser copy. FIRST: needs only import metadata, and the later
+        log.exception("album dedup pass errored (non-fatal)")   # passes then never waste work on a dropped dup
+    try:
+        convert.run(cfg)                     # normalise WMA->Opus, WAV/AIFF->FLAC BEFORE verify so every later
     except Exception:                        # pass runs identically on the converted files; best-effort
         log.exception("convert pass errored (non-fatal)")
     wm_new = datetime.now().replace(microsecond=0).isoformat()   # after import: this run's items are < wm_new
@@ -42,10 +47,6 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False) ->
     except Exception:                        # AB downtime must never break the import pipeline
         log.exception("acousticbrainz pass errored (non-fatal)")
     qa.run(cfg, scope=scope, cull=True)      # audit + cull corrupt files -> quarantine/corrupt (never gates)
-    try:
-        albumdedup.run(cfg)                  # same album matched to MB + Discogs -> quarantine the lesser copy
-    except Exception:                        # album dedup must never break the import pipeline
-        log.exception("album dedup pass errored (non-fatal)")
     try:
         reclaim.run(cfg)                     # preserve-mode only: verified source albums -> quarantine
     except Exception:                        # reclaim must never break the import pipeline
