@@ -52,8 +52,8 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(ab._value("danceable", 0.8763), 0.8763)        # float kept as-is
         self.assertEqual(ab._value("initial_key", "F#m"), "F#m")        # str kept as-is
 
-    def test_value_bad_bpm_falls_back(self):
-        self.assertEqual(ab._value("bpm", "not-a-number"), "not-a-number")  # must not raise / abort the batch
+    def test_value_bad_bpm_dropped(self):
+        self.assertIsNone(ab._value("bpm", "not-a-number"))   # non-numeric bpm -> None -> dropped from payload
         self.assertIsNone(ab._value("bpm", None))
 
 
@@ -92,12 +92,8 @@ class TestRun(Base):
         def fake_run_beet(cfg, args, **k):
             calls.append(args)
             if args and args[0] == "ls":
-                fmt = args[2] if len(args) > 2 else ""
-                if "\\t" in fmt or "\t" in fmt:
-                    if path_map:
-                        return 0, "\n".join(f"{m}\t{path_map[m]}" for m in mbids if m in path_map)
-                    return 0, ""
-                return 0, "\n".join(mbids)
+                # run() lists "$mb_trackid\t$path" in ONE scoped query; default a path if the test gave none
+                return 0, "\n".join(f"{m}\t{(path_map or {}).get(m, '/x/' + m + '.flac')}" for m in mbids)
             return 0, ""
 
         def fake_bulk(cfg, modified, log):
@@ -158,6 +154,19 @@ class TestRun(Base):
         self.assertEqual(list(applied), [MB_A])
         cache = json.loads((self.cfg.beetsdir / "gbc-acousticbrainz-cache.json").read_text())
         self.assertNotIn("14266022-1", cache)             # not even cached as absent
+
+    def test_flex_tags_use_paths_captured_before_apply(self):
+        """Regression: file-tag injection must use the paths captured in the FIRST query, not a re-query AFTER
+        the bpm write -- a scope like '^bpm:1..' would otherwise match 0 rows post-write and tag 0 files."""
+        f = self.tmp / "song.flac"
+        f.write_bytes(b"x")                               # real file so Path(path).is_file() is True
+        written = []
+        with mock.patch.object(ab, "_write_file_tags",
+                               lambda p, flex, log: (written.append((p, flex)), True)[1]):
+            self._run([MB_A], lambda batch: {MB_A: DOC}, path_map={MB_A: str(f)})
+        self.assertEqual([p for p, _ in written], [str(f)])           # tagged the captured path
+        self.assertIn("voice_instrumental", written[0][1])           # a curated flex attr reached the writer
+        self.assertNotIn("bpm", written[0][1])                       # bpm is a native field, not a flex tag here
 
     def test_flex_tag_ls_query_is_scoped_not_per_id_or(self):
         """run() lists paths for tagging via the SAME scoped `mb_trackid::.` query, not a

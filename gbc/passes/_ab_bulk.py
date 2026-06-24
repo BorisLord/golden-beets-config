@@ -35,9 +35,15 @@ def main() -> int:
                 item.store()
                 written.append(item)
                 updated += 1
+    failed = 0
     for item in written:                           # try_write OUTSIDE the txn: don't hold the SQLite write lock
-        item.try_write()
-    print(updated)
+        try:
+            item.try_write()                       # best-effort: the committed DB store is the source of truth
+        except Exception:                          # one bad file must not abort the rest or hide the store success
+            failed += 1
+    print(updated)                                 # ALWAYS report the store count, even if some tag writes failed
+    if failed:
+        print(f"tag-write failed for {failed} item(s)", file=sys.stderr)
     return 0
 
 

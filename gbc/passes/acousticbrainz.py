@@ -124,13 +124,13 @@ def _fetch(mbids: list[str]):
 
 
 def _value(field: str, value):
-    """bpm -> rounded int (media field); rest stay as fetched. A non-numeric bpm falls back to raw rather
-    than aborting the batch."""
+    """bpm -> rounded int (media field); rest stay as fetched. A non-numeric bpm -> None (dropped by the
+    payload builder) so a bad value never lands in beets' integer bpm field and aborts a later store()."""
     if field == "bpm":
         try:
             return round(float(value))
         except (TypeError, ValueError):
-            return value
+            return None
     return value
 
 
@@ -156,7 +156,8 @@ def _beets_python(beet: str) -> str:
 def _bulk_apply(cfg: Config, modified: dict, log) -> None:
     """Apply all {mbid: fields} in ONE beets process via _ab_bulk.py (vs one `beet modify` per recording --
     ~N startups, the pass's real cost). Best-effort: failure logged, never raised (already cached)."""
-    payload = {m: {k: _value(k, v) for k, v in f.items()} for m, f in modified.items()}
+    payload = {m: {k: nv for k, v in f.items() if (nv := _value(k, v)) is not None}
+               for m, f in modified.items()}
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
     # per-run temp name: two concurrent runs must not clobber each other's payload
     fd, tmp = tempfile.mkstemp(dir=cfg.beetsdir, prefix="gbc-ab-modify-", suffix=".json")
@@ -223,9 +224,18 @@ def run(cfg: Config, scope: str = "") -> int:
     """Enrich tracks in `scope` (whole library if empty). Returns the number of recordings enriched."""
     log = get_logger("acousticbrainz")
     sc = [scope] if scope else []
-    _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid", "mb_trackid::.", *sc],
+    # Capture mbid->paths UP FRONT, in the same scoped query: file-tag injection (below) must use these, NOT a
+    # re-query AFTER _bulk_apply -- applying bpm would invalidate a scope that filters on bpm (e.g. "^bpm:1..")
+    # and silently tag 0 files. One row per (recording, album), so a recording can map to several paths.
+    _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid\t$path", "mb_trackid::.", *sc],
                        passname="acousticbrainz", echo_lines=False)
-    mbids = sorted({ln.strip() for ln in text.splitlines() if ln.strip() and _UUID_RE.match(ln.strip())})
+    paths_by_mbid: dict = {}
+    for ln in text.splitlines():
+        mb, _, path = ln.partition("\t")
+        mb = mb.strip()
+        if mb and path and _UUID_RE.match(mb):
+            paths_by_mbid.setdefault(mb, []).append(path.strip())
+    mbids = sorted(paths_by_mbid)
     if not mbids:
         log.info("=== acousticbrainz: no MB-matched tracks in scope ===")
         return 0
@@ -264,24 +274,18 @@ def run(cfg: Config, scope: str = "") -> int:
     if modified:
         _bulk_apply(cfg, modified, log)
 
-    # Flex attrs -> file tags via mutagen (mediafile only writes native fields).
+    # Flex attrs -> file tags via mutagen (mediafile only writes native fields). Uses the paths captured up
+    # front (paths_by_mbid) so it can't be invalidated by the bpm write above.
     if modified and importlib.util.find_spec("mutagen") is not None:
-        # Reuse the scoped query (not an `mb_trackid:<id>,...` OR of every id -- thousands exceed
-        # MAX_ARG_STRLEN 128 KB for one argv entry -> execve E2BIG), then filter rows to what we enriched.
-        _, paths_text = run_beet(
-            cfg, ["ls", "-f", "$mb_trackid\t$path", "mb_trackid::.", *sc],
-            passname="acousticbrainz", echo_lines=False)
         tagged = 0
-        for line in paths_text.splitlines():
-            if "\t" not in line:
-                continue
-            mbid, path = line.split("\t", 1)
-            if mbid not in modified:
-                continue
-            path = path.strip().encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+        for mbid in modified:
             flex = {k: v for k, v in modified[mbid].items() if k in FLEX_ATTRS}
-            if flex and Path(path).is_file() and _write_file_tags(path, flex, log):
-                tagged += 1
+            if not flex:
+                continue
+            for path in paths_by_mbid.get(mbid, []):
+                path = path.encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+                if Path(path).is_file() and _write_file_tags(path, flex, log):
+                    tagged += 1
         log.info("acousticbrainz: %d file(s) tagged with flex attrs", tagged)
     elif modified and importlib.util.find_spec("mutagen") is None:
         log.warning("acousticbrainz: mutagen not installed -> flex attrs stay db-only (invisible to players)")
