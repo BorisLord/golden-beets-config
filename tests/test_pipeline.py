@@ -1,12 +1,51 @@
+import contextlib
 import unittest
 from unittest import mock
 
 from gbc import state
-from gbc.passes import import_, pipeline, qa
+from gbc.passes import acousticbrainz, albumdedup, convert, import_, pipeline, qa, reclaim, upgrade, verify
 from tests.base import Base
 
 
 class TestPipeline(Base):
+    def _trace_all_passes(self, calls):
+        """Patch every pass to just record its name + return 0 (so resume can be observed deterministically)."""
+        return [
+            mock.patch.object(import_, "run", lambda c, *a, **k: calls.append("import") or 0),
+            mock.patch.object(upgrade, "run", lambda c, *a, **k: calls.append("upgrade") or 0),
+            mock.patch.object(albumdedup, "run", lambda c, *a, **k: calls.append("albumdedup") or 0),
+            mock.patch.object(convert, "run", lambda c, *a, **k: calls.append("convert") or 0),
+            mock.patch.object(verify, "run", lambda c, *a, **k: calls.append("verify") or 0),
+            mock.patch.object(acousticbrainz, "run", lambda c, *a, **k: calls.append("acousticbrainz") or 0),
+            mock.patch.object(qa, "run", lambda c, *a, **k: calls.append("qa") or 0),
+            mock.patch.object(reclaim, "run", lambda c, *a, **k: calls.append("reclaim") or 0),
+        ]
+
+    def test_resume_skips_already_done_passes(self):
+        calls = []
+        # an in-flight run (same identity as a no-watermark run) that already finished import + upgrade
+        state.set_progress(self.cfg, {"key": "initial", "wm_new": "2026-06-25T10:00:00",
+                                      "done": ["import", "upgrade"]})
+        with contextlib.ExitStack() as es:
+            for p in self._trace_all_passes(calls):
+                es.enter_context(p)
+            rc = pipeline.run(self.cfg)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("import", calls)                          # skipped -> no source re-walk
+        self.assertNotIn("upgrade", calls)
+        self.assertEqual(calls, ["albumdedup", "convert", "verify", "acousticbrainz", "qa", "reclaim"])
+        self.assertEqual(state.get_progress(self.cfg), {})         # cleared on clean finish
+        self.assertEqual(state.get_watermark(self.cfg), "2026-06-25T10:00:00")  # the resumed wm_new is reused
+
+    def test_progress_from_other_run_identity_is_ignored(self):
+        calls = []
+        state.set_progress(self.cfg, {"key": "full", "wm_new": "x", "done": ["import", "albumdedup", "convert"]})
+        with contextlib.ExitStack() as es:
+            for p in self._trace_all_passes(calls):
+                es.enter_context(p)
+            pipeline.run(self.cfg)                                 # incremental -> key "initial" != "full"
+        self.assertEqual(calls[0], "import")                       # different identity -> fresh, nothing skipped
+        self.assertIn("albumdedup", calls)
     def test_qa_scope_follows_watermark(self):
         seen = {}
 
