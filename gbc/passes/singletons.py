@@ -1,0 +1,128 @@
+"""Singleton recovery (OPT-IN) -- import LOOSE source tracks (and quarantined imposters) as singletons, each
+matched to its MB recording by AcoustID, filed under _Singles/ (config `singleton:` path). Tracks already in
+clean DUP-SKIP by mb_trackid, so only genuinely-loose fragments are added.
+
+Then two reassembly steps run (dry unless --apply):
+  1. nova.reroute() -- OPT-IN/detachable: re-tag dispersed Nova-compilation tracks to their compil (Nova first).
+  2. _promote_complete() -- GENERAL: any album/compil/soundtrack whose ENTIRE MusicBrainz tracklist is now
+     present as singletons is re-imported as a real album, so beets routes it out of _Singles/ into
+     <artist>/ | _Various Artists/ | _Soundtracks/ per the paths rules. Incomplete sets stay in _Singles/.
+
+NOT part of `gbc run` (which stays album-only by design); run it deliberately with `gbc singletons`.
+"""
+import re
+from collections import defaultdict
+from contextlib import suppress
+from pathlib import Path
+
+from .. import artfix
+from ..beets import run_beet
+from ..config import Config
+from ..logs import get_logger
+from ..mb import release_recordings
+from ..sidecars import safe_move
+from ..util import backup_db, count_items, prune_empty_dirs
+
+try:                                  # Nova is OPT-IN + detachable: deleting nova.py just disables the re-tag
+    from . import nova
+except Exception:                     # pragma: no cover
+    nova = None                       # type: ignore[assignment]
+
+
+def run(cfg: Config, src=None, reimport: bool = False, apply: bool = False) -> int:
+    log = get_logger("singletons")
+    src = Path(src) if src else cfg.src
+    if not src.is_dir():
+        log.error("source missing: %s", src)
+        return 1
+    # Always ALSO recover quarantined imposters (audio != tag = mislabeled; the fingerprint finds their TRUE
+    # recording). Skip silently if the folder isn't there.
+    dirs = [src]
+    imposters = cfg.dump / "imposters"
+    if imposters.is_dir():
+        dirs.append(imposters)
+    else:
+        log.info("singletons: no %s -> imposters step skipped", imposters)
+    backup_db(cfg, "singletons", log)
+    before = count_items(cfg, ["ls"], "singletons")
+    inc = "-I" if reimport else "-i"               # -I re-evaluates album-rejected folders as singletons
+    for d in dirs:
+        artfix.run(cfg, src=d, log=log)            # strip mime=None WMA art so scrub can't crash beet import
+        rc, _ = run_beet(cfg, ["import", "-q", "-s", inc, str(d)], passname="singletons")
+        if rc:
+            log.error("beet import -s %s failed (rc=%d) -- nothing deleted", d, rc)
+            return rc
+    added = count_items(cfg, ["ls"], "singletons") - before   # already-present tracks dup-skip; delta = new ones
+    log.info("singletons: +%d loose track(s) recovered -> _Singles/", added)
+    if nova is not None:
+        nova.reroute(cfg, log, apply)              # NOVA FIRST: dispersed Nova tracks regroup under their compil
+    _promote_complete(cfg, log, apply)             # then promote ANY now-complete album out of _Singles/
+    return 0
+
+
+def _promote_complete(cfg: Config, log, apply: bool) -> int:
+    """Group loose singletons by their matched release; an album whose ENTIRE MusicBrainz tracklist is now
+    present as singletons is re-imported as a real album (beets routes it to <artist>/_Various Artists/
+    _Soundtracks per the paths rules). ROBUST: completeness is decided against the live MB release tracklist,
+    not the stored `tracktotal` -- tracktotal is only a cheap pre-filter to skip pointless MB calls."""
+    _, text = run_beet(cfg, ["ls", "-f", "$mb_albumid\t$id\t$mb_trackid\t$tracktotal\t$path",
+                             "singleton:1", "mb_albumid::."], passname="singletons", echo_lines=False)
+    albums: dict = defaultdict(lambda: {"items": [], "total": 0})
+    for line in text.splitlines():
+        albumid, _, rest = line.partition("\t")
+        sid, _, rest = rest.partition("\t")
+        tid, _, rest = rest.partition("\t")
+        tt, _, path = rest.partition("\t")
+        if albumid.strip() and path:
+            a = albums[albumid.strip()]
+            a["items"].append((sid.strip(), tid.strip(), path))
+            a["total"] = max(a["total"], int(tt) if tt.strip().isdigit() else 0)
+    cache: dict = {}
+    promoted = 0
+    for albumid, a in albums.items():
+        items = a["items"]
+        if a["total"] and len(items) < a["total"]:
+            continue                                  # cheap pre-filter: fewer tracks present than the album has
+        if albumid not in cache:
+            cache[albumid] = release_recordings(albumid)
+        official = cache[albumid]
+        have = {tid for _, tid, _ in items if tid}
+        if not official or not official <= have:      # robust: every MB tracklist recording must be present
+            continue
+        if _assemble_album(cfg, albumid, items, log, apply):
+            promoted += 1
+    log.info("singletons: %d complete album(s) %s out of _Singles/",
+             promoted, "promoted" if apply else "would be promoted")
+    return promoted
+
+
+def _assemble_album(cfg: Config, albumid: str, items, log, apply: bool) -> bool:
+    """Stage the album's files, drop their singleton rows, re-import the staging dir AS ONE ALBUM from its
+    EXISTING tags (`-A --flat -m`). No MB re-match: `_promote_complete` already verified the set against the live
+    tracklist, so `-A` files it deterministically (offline, never quiet-mode 'Skipping'); beets routes by tags
+    into <artist>/ | _Various Artists/ | _Soundtracks/. Leftover files are put back as singletons -- never lost."""
+    label = f"{albumid} ({len(items)} trk)"
+    if not apply:
+        log.info("  COMPLETE -> would promote album %s", label)
+        return True
+    staging = cfg.beetsdir / ".gbc-assemble" / re.sub(r"[^\w.-]", "_", albumid)
+    staging.mkdir(parents=True, exist_ok=True)
+    moved = [sid for sid, _tid, path in items
+             if Path(path).exists() and safe_move(path, staging / Path(path).name, log)]
+    if not moved:
+        log.warning("  promote %s: no files moved -> skipped", label)
+        return False
+    rm = ["remove", "-f"]                              # drop the now-staged singleton rows (else import dup-skips)
+    for i, sid in enumerate(moved):
+        rm += ([","] if i else []) + [f"id:{sid}"]
+    run_beet(cfg, rm, passname="singletons", echo_lines=False)
+    rc, _ = run_beet(cfg, ["import", "-q", "-I", "-A", "--flat", "-m", str(staging)], passname="singletons")
+    if any(p.is_file() for p in staging.iterdir()):   # leftover -> restore as singletons (no loss)
+        log.warning("  promote %s: album import left files -> restoring as singletons", label)
+        run_beet(cfg, ["import", "-q", "-I", "-s", "-A", "-m", str(staging)], passname="singletons")
+    with suppress(OSError):
+        staging.rmdir()
+        staging.parent.rmdir()
+    prune_empty_dirs(cfg.clean / "_Singles")
+    log.info("  PROMOTED album -> %s", label)
+    return rc == 0
