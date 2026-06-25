@@ -3,14 +3,18 @@
 #       sources, or set your own keys locally (never committed).
 # NOTE: setup.sh patches directory + log. library defaults to library.db alongside this file.
 directory: ~/Music/beetsPipeline/clean   # setup.sh patches this from config.env
+timeout: 10.0   # SQLite busy-timeout (s): a concurrent `beet ls` waits out an in-progress import write
+                # instead of erroring "database is locked" (default 5.0)
 
 # All these run automatically during import (auto: yes, configured below); duplicates/unimported/zero/
 # missing/mbsync/bareasc stay command-only for manual use.
-plugins: musicbrainz discogs chroma fromfilename fetchart embedart lastgenre replaygain scrub ftintitle duplicates unimported zero missing mbsync bareasc types
+plugins: musicbrainz discogs deezer bandcamp chroma fromfilename fetchart embedart lastgenre replaygain scrub ftintitle duplicates unimported zero missing mbsync bareasc types
 # fromfilename: when tags are missing/poor, guess title/track/artist from the FILENAME -> better MB match
 #               on a chaotic source (native, auto during import; only fills EMPTY fields, never overwrites).
 # NOTE: `musicbrainz` MUST be listed -- it's a separate metadata-source plugin; without it `chroma`
 #       produces NO MusicBrainz candidates and matching finds nothing.
+# deezer (beets-native) + bandcamp (needs `beetcamp`, see setup.sh): extra KEYLESS match sources, purely
+#        ADDITIVE (ranked by distance, never override a good MB match). spotify/beatport left out (key-gated).
 
 # Declare the numeric AcousticBrainz flex attributes (gbc acousticbrainz pass) as floats so range
 # queries work -- e.g. `beet ls mood_relaxed:0.9..` or `danceable:0.7..`. Without this beets stores
@@ -98,16 +102,18 @@ unimported:
   ignore_extensions: jpg png pdf log cue m3u nfo txt
   # ignore_subdirectories: <your quarantine/dump folder names>
 
-# Compilations keep their comp=1 TAG but are filed by $albumartist (Various Artists -> "Various
-# Artists/<album>/"), NOT in a separate Compilations/ tree. comp: MUST be set explicitly = default:
-# — beets' BUILT-IN default for comp: is 'Compilations/...', so merely omitting it does NOT work.
+# Special collections get an "_" prefix so they sort at the TOP of clean/ (above the A-Z artists) on disk:
+# _Soundtracks/ (VA OSTs), _Various Artists/ (VA compilations), _Singles/ (loose tracks from `gbc singletons`).
+# TAGS are unchanged (albumartist stays "Various Artists") -> Navidrome still groups by tag; the "_" is
+# filesystem-only. The plain `comp:` rule keeps single-artist comps (Best of X) under the artist AND overrides
+# beets' BUILT-IN 'Compilations/' default (which would otherwise hijack them -- omitting comp: does NOT work).
 paths:
-  # Only VARIOUS-ARTISTS soundtracks go to Soundtracks/; a single-artist soundtrack (Purple Rain,
-  # A Hard Day's Night...) stays under its artist via default:. Key must precede comp: to win for VA OSTs.
-  comp:1 albumtype:soundtrack: 'Soundtracks/$album%aunique{}/%if{$track,$track }$artist - $title'
-  default:   '$albumartist/$album%if{$year, ($year)}%aunique{}/%if{$track,$track - }$title'
-  comp:      '$albumartist/$album%aunique{}/%if{$track,$track }$artist - $title'
-  singleton: '%if{$album,$albumartist/$album%aunique{}/%if{$track,$track - }$title,$artist/$title%sunique{}}'
+  # First match wins: VA soundtrack, then VA compilation, then the single-artist comp catch-all, then default.
+  comp:1 albumtype:soundtrack:         '_Soundtracks/$album%aunique{}/%if{$track,$track }$artist - $title'
+  comp:1 albumartist::Various Artists: '_Various Artists/$album%aunique{}/%if{$track,$track }$artist - $title'
+  comp:                                '$albumartist/$album%aunique{}/%if{$track,$track }$artist - $title'
+  default:                             '$albumartist/$album%if{$year, ($year)}%aunique{}/%if{$track,$track - }$title'
+  singleton:                           '_Singles/%if{$albumartist,$albumartist,$artist}/%if{$album,$album%aunique{}/}%if{$track,$track - }$title'
 
 # Everything runs natively DURING `beet import` (auto: yes): chroma match, scrub, fetchart (folder->web),
 # embedart, lastgenre, ftintitle, replaygain. gbc only adds dedup + sidecars + qa around it.
@@ -116,7 +122,9 @@ scrub: {auto: yes}    # MANDATORY on every move; strip mime=None ASF/WMA images 
 fetchart:
   auto: yes                # native: art fetched during import (filesystem first -> web fallback)
   maxwidth: 1000
-  minwidth: 300
+  minwidth: 500            # reject tiny/thumbnail art (was 300)
+  enforce_ratio: 10%       # reject banners/strips: keep only ~square covers (within 10%)
+  max_filesize: 5242880    # 5 MiB cap -- skip bloated scans bound for the clean library
   quality: 75
   store_source: yes
   fanarttv_key: REPLACE_ME

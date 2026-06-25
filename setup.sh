@@ -19,10 +19,10 @@ if ! have uv; then
 fi
 
 # beets via uv tool (extras: chroma->pyacoustid, fetchart->requests/Pillow, lastgenre->pylast,
-# discogs->python3-discogs-client for the Discogs metadata source fallback)
+# discogs->python3-discogs-client). --with beetcamp = the keyless `bandcamp` source (`deezer` is built in).
 if ! have beet; then
   read -rp "  install beets now via 'uv tool'? [y/N] " a
-  if [ "$a" = y ] || [ "$a" = Y ]; then uv tool install 'beets[chroma,fetchart,lastgenre,discogs]'; fi
+  if [ "$a" = y ] || [ "$a" = Y ]; then uv tool install 'beets[chroma,fetchart,lastgenre,discogs]' --with beetcamp; fi
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
