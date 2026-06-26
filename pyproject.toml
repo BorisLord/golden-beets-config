@@ -3,7 +3,9 @@
 [project]
 name = "golden-beets-config"
 version = "0.8.0"
-description = "Recover a chaotic music library into a clean album library (beets-driven pipeline)."
+description = "Opinionated, beets-driven pipeline that sorts and tags a music library into clean, complete albums and a separate singles collection, AcoustID/MusicBrainz-verified."
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = ["filelock>=3.29", "pyacoustid>=1.3", "pyyaml>=6", "mediafile>=0.17", "mutagen>=1.48"]
 
