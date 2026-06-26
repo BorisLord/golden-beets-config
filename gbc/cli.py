@@ -8,6 +8,11 @@ from .lock import import_lock
 from .logs import configure
 from .passes import acousticbrainz, convert, import_, inbox, nova, pipeline, qa, singletons, upgrade, verify
 
+try:                                  # TEMPORARY/detachable -- delete restore_imposters.py to remove the command
+    from .passes import restore_imposters
+except ImportError:                               # pragma: no cover
+    restore_imposters = None
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gbc", description="Beets-driven music recovery pipeline.")
@@ -39,6 +44,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pup = sub.add_parser("upgrade", help="replace a clean album with a better source copy (also runs in the pipeline)")
     pup.add_argument("source", nargs="?", help="source dir to scan (default: MUSIC_SRC)")
     pup.add_argument("--apply", action="store_true", help="execute the swap (default: report only)")
+    if restore_imposters is not None:             # TEMPORARY one-off command (detachable)
+        prs = sub.add_parser("restore-imposters",
+                             help="[TEMPORARY] re-merge falsely-quarantined imposters back into clean")
+        prs.add_argument("--apply", action="store_true", help="execute the restore (default: report only)")
     pini = sub.add_parser("init", help="deploy config + beets overlays (+ optional cron)")
     pini.add_argument("--cron", action="store_true", help="also schedule `gbc inbox` every 15 min")
     pun = sub.add_parser("uninstall", help="remove tooling (never your music)")
@@ -75,6 +84,9 @@ def main(argv=None) -> int:
     if args.cmd == "upgrade":
         with import_lock(cfg, blocking=True):
             return upgrade.run(cfg, src=args.source, apply=args.apply)
+    if args.cmd == "restore-imposters":           # TEMPORARY one-off (detachable)
+        with import_lock(cfg, blocking=True):
+            return restore_imposters.run(cfg, apply=args.apply)
     if args.cmd == "convert":
         with import_lock(cfg, blocking=True):
             return convert.run(cfg)
