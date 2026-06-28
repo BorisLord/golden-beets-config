@@ -88,7 +88,14 @@ class TestPipeline(Base):
             seen["qa"] = scope
             return 0
 
+        # mock EVERY post-import pass, not just import+qa: an unmocked pass errors when `beet` is absent
+        # (CI), and the watermark-HOLD would then block the advance this test asserts -> isolate the scope logic
         with mock.patch.object(import_, "run", lambda c, src=None, reimport=False: 0), \
+             mock.patch.object(upgrade, "run", lambda *a, **k: 0), \
+             mock.patch.object(albumdedup, "run", lambda *a, **k: 0), \
+             mock.patch.object(convert, "run", lambda *a, **k: 0), \
+             mock.patch.object(verify, "run", lambda *a, **k: 0), \
+             mock.patch.object(acousticbrainz, "run", lambda *a, **k: 0), \
              mock.patch.object(qa, "run", fake_qa):
             # first run: no watermark -> qa over whole library; watermark set afterwards
             self.assertEqual(pipeline.run(self.cfg), 0)
