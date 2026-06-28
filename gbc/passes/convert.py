@@ -30,7 +30,7 @@ def _reap_stale(cfg: Config, query: list, log) -> tuple[int, int]:
             continue
         with skip_on_error(log, "convert", line[:80]):
             itemid, path = line.split("\t", 1)
-            path = path.strip().encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+            path = path.strip()                    # run_beet already decoded with surrogateescape; no re-round-trip
             if path and not Path(path).exists():
                 rc, _ = run_beet(cfg, ["remove", "-f", f"id:{itemid}"], passname="convert", echo_lines=False)
                 if rc:

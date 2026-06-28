@@ -53,9 +53,12 @@ def run(cfg: Config, src=None, reimport=False) -> int:
         try:
             sidecars.snapshot(str(src), snap, log)                  # snapshot BEFORE import, while source has its audio
             rc = _beet_import(cfg, src, reimport, log)
-            sidecars.apply(cfg, snap, str(cfg.dump), True, log)
-            sidecars.prune_shells(str(src), str(cfg.dump), True, log)
-            prune_empty_dirs(src)
+            if rc == 0:                                 # only mutate the consumed source on a CLEAN import (else retry)
+                sidecars.apply(cfg, snap, str(cfg.dump), True, log)
+                sidecars.prune_shells(str(src), str(cfg.dump), True, log)
+                prune_empty_dirs(src)
+            else:
+                log.error("import rc=%d -> skip sidecars/prune; source left intact for the next run's retry", rc)
         finally:
             Path(snap).unlink(missing_ok=True)
     else:

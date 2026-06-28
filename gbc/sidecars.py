@@ -26,6 +26,17 @@ def safe_move(src, dst, log) -> bool:
         return False
     return True
 
+
+def unique_dest(folder, name):
+    """A NON-colliding destination path in `folder` for `name`: append ' (N)' before the suffix while it exists.
+    `shutil.move` overwrites an existing file, so callers staging same-basename tracks (VA comps) must use this."""
+    dest = Path(folder) / name
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = Path(folder) / f"{Path(name).stem} ({n}){Path(name).suffix}"
+    return dest
+
 AUDIO = {".mp3", ".flac", ".m4a", ".m4b", ".aac", ".alac", ".ogg", ".oga", ".opus", ".wma",
          ".wav", ".aif", ".aiff", ".ape", ".wv", ".mpc", ".tta", ".dsf", ".dff", ".mp2"}
 ART = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".pdf"}
@@ -46,7 +57,8 @@ def quarantine_dir(dump, reason, albumartist="", album="", year="", *, fallback=
     `reason` = category (imposters/duplicates/redundant-art/shells). Falls back to <reason>/<fallback>
     when there is no metadata (audio-less shells, untagged files)."""
     base = Path(dump) / reason
-    artist = _san(albumartist)
+    # mirror clean's "_"-prefixed VA collection (callers may pass it already, or a metadata-only/de-underscored name)
+    artist = {"Various Artists": "_Various Artists"}.get(_san(albumartist), _san(albumartist))
     album_dir = _san(album)
     y = str(year).strip()[:4]
     if y and y not in ("0", "0000", "None"):
@@ -84,7 +96,7 @@ def durs_of(paths):
 
 
 def matches(a, b):                          # both sorted; same count + each pair within TOL
-    return len(a) == len(b) and all(abs(x - y) <= TOL for x, y in zip(a, b, strict=False))
+    return len(a) == len(b) and all(abs(x - y) <= TOL for x, y in zip(a, b, strict=True))
 
 
 def snapshot(src, out, log=None):
@@ -163,16 +175,18 @@ def prune_shells(src, dump, do_apply, log=None):
     WITH its parent shell. Folders still holding audio (skipped albums) stay in source."""
     log = _log(log)
     src = str(src)
-    has_audio = {}
+    has_audio, direct_audio = {}, {}
     for dp, dirs, files in os.walk(src, topdown=False):
-        has_audio[dp] = (any(Path(f).suffix.lower() in AUDIO for f in files)
-                         or any(has_audio.get(str(Path(dp) / d), False) for d in dirs))
+        direct_audio[dp] = any(Path(f).suffix.lower() in AUDIO for f in files)
+        has_audio[dp] = direct_audio[dp] or any(has_audio.get(str(Path(dp) / d), False) for d in dirs)
     targets = []
     for dp, dirs, files in os.walk(src):
         if dp == src or has_audio.get(dp, False) or not (files or dirs):
             continue
         parent = str(Path(dp).parent)
-        if parent == src or has_audio.get(parent, False):   # topmost audio-empty dir = the album shell
+        # topmost audio-empty dir = an album shell: parent has audio only via OTHER subdirs (artist folder), not
+        # directly. A parent with audio DIRECTLY is a LIVE (skipped) album -> don't strip its Scans/ @eaDir/ subfolder.
+        if parent == src or (has_audio.get(parent, False) and not direct_audio.get(parent, False)):
             targets.append(dp)
     moved = 0
     for dp in targets:

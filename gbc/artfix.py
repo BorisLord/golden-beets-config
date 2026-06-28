@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .config import Config
 from .logs import get_logger
+from .util import write_json
 
 CACHE = "gbc-artfix-cache.json"
 
@@ -73,8 +74,7 @@ def run(cfg: Config, src=None, log=None) -> int:
                     failed += 1
             else:
                 cache.add(key)                     # clean & unchanged -> remember, never re-parse
-    cfg.beetsdir.mkdir(parents=True, exist_ok=True)
-    cpath.write_text(json.dumps(sorted(cache)), encoding="utf-8")
+    write_json(cpath, sorted(cache))                       # atomic (tmp + replace): a crash can't corrupt the cache
     if fixed or failed:
         log.info("=== artfix: %d WMA broken-art stripped (%d unfixable) ===", fixed, failed)
     return fixed

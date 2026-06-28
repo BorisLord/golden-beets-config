@@ -94,7 +94,10 @@ def read_api_keys() -> dict:
         return {}
     script = 'set -a; . "$1"; ' + "".join(f'printf "%s\\0" "${{{v}-}}"; ' for v in API_KEYS)
     out = subprocess.run([bash, "-c", script, "_", str(path)], capture_output=True, text=True)
-    if out.returncode != 0:
+    if out.returncode != 0:                        # a broken config.env is a real error, not "no keys" -- surface it
+        from .logs import get_logger
+        get_logger("config").warning("read_api_keys: sourcing config.env failed (rc=%d) -- keys not loaded",
+                                     out.returncode)
         return {}
     parts = out.stdout.split("\0")
     return {field: parts[i].strip()

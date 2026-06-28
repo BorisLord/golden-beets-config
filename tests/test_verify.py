@@ -9,14 +9,16 @@ from tests.base import Base
 
 class TestVerify(Base):
     def _items(self, specs):
-        """specs: [(stem, mbid)] -> create the files (so stat() works) + return the fake `beet ls` text
-        (8 fields: $id $path $mb_trackid $albumartist $album $year $artist $title)."""
+        """specs: [(stem, mbid)] -> create files under clean TestArtist/TestAlbum (2001)/ + return the fake
+        `beet ls` text (7 fields: $id $path $mb_trackid $artist $title $length $bitrate)."""
+        self.adir = self.cfg.clean / "TestArtist" / "TestAlbum (2001)"
+        self.adir.mkdir(parents=True, exist_ok=True)
         lines = []
         for i, (stem, mbid) in enumerate(specs, 1):
-            (self.tmp / f"{stem}.m4a").write_bytes(b"x")
-            p = self.tmp / f"{stem}.m4a"
-            lines.append(f"{i}{verify.SEP}{p}{verify.SEP}{mbid}{verify.SEP}TestArtist{verify.SEP}TestAlbum"
-                         f"{verify.SEP}2001{verify.SEP}TestArtist{verify.SEP}TestTitle")
+            p = self.adir / f"{stem}.m4a"
+            p.write_bytes(b"x")
+            lines.append(f"{i}{verify.SEP}{p}{verify.SEP}{mbid}{verify.SEP}TestArtist{verify.SEP}TestTitle"
+                         f"{verify.SEP}3:30{verify.SEP}256kbps")
         return "\n".join(lines)
 
     def test_quarantines_only_conclusive_imposters(self):
@@ -30,10 +32,10 @@ class TestVerify(Base):
              mock.patch.object(verify, "_file_verdict", lambda p, m: fv[Path(p).stem]):
             n = verify.run(self.cfg)
         self.assertEqual(n, 1)                                    # only the real imposter (b)
-        self.assertFalse((self.tmp / "b.m4a").exists())           # imposter moved out of "clean"
+        self.assertFalse((self.adir / "b.m4a").exists())           # imposter moved out of "clean"
         self.assertTrue((self.cfg.dump / "imposters" / "TestArtist" / "TestAlbum (2001)" / "b.m4a").exists())
         for stem in ("a", "c", "d"):
-            self.assertTrue((self.tmp / f"{stem}.m4a").exists())  # genuine / inconclusive kept
+            self.assertTrue((self.adir / f"{stem}.m4a").exists())  # genuine / inconclusive kept
 
     def test_skips_cleanly_without_pyacoustid(self):
         with mock.patch.object(verify, "_acoustid_available", lambda: False):
@@ -82,8 +84,7 @@ class TestVerify(Base):
         self.assertEqual((status, present, mismatch), ("ok", False, None))
 
     def test_confident_mismatch_quarantined(self):
-        """A confident DIFFERENT-recording match (different artist, not a sibling) is positive evidence -> the
-        track is quarantined as an imposter and an IMPOSTER warning is logged."""
+        """A confident different-artist match (not a sibling) -> quarantined as imposter + IMPOSTER warning logged."""
         text = self._items([("a", "mbA")])
         fv = {"a": ("ok", False, ("Barcode Brothers", "Some Other Song", 0.93))}
         with mock.patch.object(verify, "_acoustid_available", lambda: True), \
@@ -92,12 +93,12 @@ class TestVerify(Base):
              self.assertLogs("gbc", "WARNING") as cm:
             n = verify.run(self.cfg)
         self.assertEqual(n, 1)                                   # quarantined (audio is a different recording)
-        self.assertFalse((self.tmp / "a.m4a").exists())          # moved out of clean
+        self.assertFalse((self.adir / "a.m4a").exists())          # moved out of clean
         self.assertTrue(any("IMPOSTER" in m and "Barcode Brothers" in m for m in cm.output))
 
     def test_sibling_recording_kept_even_if_known(self):
-        """Zenzile case: audio confidently matches the SAME title with an overlapping artist credit (a sibling
-        recording id) -> verdict 'ok', kept + no warning, EVEN THOUGH the tagged id is known to AcoustID."""
+        """Zenzile case: confident match to the SAME title with an overlapping artist credit (sibling) -> kept,
+        no warning, even though the tagged id is known to AcoustID."""
         text = self._items([("a", "mbA")])
         fv = {"a": ("ok", False, ("TestArtist Crew", "TestTitle", 0.99))}   # same title, credit-variant artist
         with mock.patch.object(verify, "_acoustid_available", lambda: True), \
@@ -106,7 +107,18 @@ class TestVerify(Base):
              self.assertNoLogs("gbc", "WARNING"):
             n = verify.run(self.cfg)
         self.assertEqual(n, 0)                                   # NOT quarantined (same-song sibling)
-        self.assertTrue((self.tmp / "a.m4a").exists())
+        self.assertTrue((self.adir / "a.m4a").exists())
+
+    def test_empty_matched_artist_kept(self):
+        """AcoustID's confident match has NO artist -> can't prove a DIFFERENT artist -> keep, don't quarantine."""
+        text = self._items([("a", "mbA")])
+        fv = {"a": ("ok", False, ("", "Some Other Title", 0.95))}        # mismatch with empty artist
+        with mock.patch.object(verify, "_acoustid_available", lambda: True), \
+             mock.patch.object(verify, "run_beet", lambda *a, **k: (0, text)), \
+             mock.patch.object(verify, "_file_verdict", lambda p, m: fv[Path(p).stem]):
+            n = verify.run(self.cfg)
+        self.assertEqual(n, 0)                                            # NOT quarantined (no artist to compare)
+        self.assertTrue((self.adir / "a.m4a").exists())
 
     def test_same_title_unrelated_artist_still_imposter(self):
         """UB40 'Don't Break My Heart' vs Den Harrow's: same title but no shared artist token -> real imposter."""
@@ -140,18 +152,28 @@ class TestVerify(Base):
              mock.patch.object(verify, "safe_move", lambda *a, **k: False):
             n = verify.run(self.cfg)
         self.assertEqual(n, 0)
-        self.assertTrue((self.tmp / "b.m4a").exists())   # kept in clean
+        self.assertTrue((self.adir / "b.m4a").exists())   # kept in clean
         self.assertFalse(any(a[0] == "remove" for a in calls))
 
-    def test_same_song_helper(self):
-        # same title + overlapping artist credit -> sibling (the false-imposter cases)
-        self.assertTrue(verify._same_song("Zenzile, High Tone", "The Source",
-                                          "Zenzile Meets High Tone", "The Source"))
-        self.assertTrue(verify._same_song("Timmi Magic, PGS", "Tell Me", "Timmi Magic & PSG", "Tell Me"))
-        # same title but unrelated artist -> NOT a sibling (genuine imposter)
-        self.assertFalse(verify._same_song("Den Harrow", "Don't Break My Heart", "UB40", "Don't Break My Heart"))
-        # different title -> not a sibling even with the same artist
-        self.assertFalse(verify._same_song("TestArtist", "Other Title", "TestArtist", "TestTitle"))
+    def test_same_artist_helper(self):
+        # SAME artist (shared non-generic token) -> kept, regardless of title (alt mix / feat. / typo / wrong track)
+        self.assertTrue(verify._same_artist("Zenzile, High Tone", "Zenzile Meets High Tone"))
+        self.assertTrue(verify._same_artist("Timmi Magic, PGS", "Timmi Magic & PSG"))
+        self.assertTrue(verify._same_artist("Björk", "Björk"))                  # alt-mix: same artist, diff title
+        self.assertTrue(verify._same_artist("M", "M"))                          # 1-char artist (-M-/Matthieu Chedid)
+        self.assertFalse(verify._same_artist("M", "K"))                         # different 1-char artists
+        self.assertTrue(verify._same_artist("Bassekou Kouyate & Ngoni Ba",
+                                            "Bassekou Kouyate, Ngoni ba, Kassé Mady Diabaté"))  # feat. in credit
+        # COMPLETELY different artist -> real imposter
+        self.assertFalse(verify._same_artist("Den Harrow", "UB40"))
+        self.assertFalse(verify._same_artist("Dire Straits", "Bedlam"))
+        # only a GENERIC token shared ("the" / "dj") -> NOT the same artist
+        self.assertFalse(verify._same_artist("The Beatles", "The Rolling Stones"))
+        self.assertFalse(verify._same_artist("DJ Abdel", "DJ Shadow"))
+        # only a leading article / stray 1-char token shared -> NOT the same artist (the over-broad-keep regression)
+        self.assertFalse(verify._same_artist("A Tribe Called Quest", "A Perfect Circle"))
+        self.assertFalse(verify._same_artist("De La Soul", "La Roux"))
+        self.assertFalse(verify._same_artist("S Club 7", "S Express"))
 
 
 if __name__ == "__main__":

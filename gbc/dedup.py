@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .logs import get_logger
 from .quality import eff, rank
-from .sidecars import AUDIO, quarantine_dir, safe_move
+from .sidecars import AUDIO, quarantine_dir, safe_move, unique_dest
 
 # Same track via the SAME ffprobe -> tight tolerance (unlike sidecars' ±6s ffprobe-vs-beets comparison).
 TOL = 3   # seconds
@@ -75,11 +75,7 @@ def dedup(src, dump, do_apply, log=None):
             keep = Path(items[0][0]).name
             for p, _, _, _ in items[1:]:
                 qd = quarantine_dir(dump, "duplicates", *_album_tags(p), fallback=Path(folder).name)
-                dest = qd / Path(p).name
-                i = 1
-                while dest.exists():
-                    i += 1
-                    dest = qd / f"{Path(p).stem} ({i}){Path(p).suffix}"
+                dest = unique_dest(qd, Path(p).name)
                 if do_apply:
                     qd.mkdir(parents=True, exist_ok=True)
                 if not do_apply or safe_move(p, dest, log):

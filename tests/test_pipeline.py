@@ -45,6 +45,28 @@ class TestPipeline(Base):
             pipeline.run(self.cfg)                                 # incremental -> key "initial" != "full"
         self.assertEqual(calls[0], "import")                       # different identity -> fresh, nothing skipped
         self.assertIn("albumdedup", calls)
+    def test_pass_error_holds_watermark_and_keeps_progress(self):
+        """A post-import pass that ERRORS must NOT advance the watermark or clear progress -> the next run
+        re-scopes the same window and retries the failed pass (the succeeded ones are skipped)."""
+        state.set_watermark(self.cfg, "2026-06-20T00:00:00")       # the prior watermark
+
+        def boom(c, *a, **k):
+            raise RuntimeError("boom")
+        patches = [mock.patch.object(import_, "run", lambda c, *a, **k: 0),
+                   mock.patch.object(upgrade, "run", lambda c, *a, **k: 0),
+                   mock.patch.object(albumdedup, "run", lambda c, *a, **k: 0),
+                   mock.patch.object(convert, "run", lambda c, *a, **k: 0),
+                   mock.patch.object(verify, "run", boom),         # one file-moving pass errors
+                   mock.patch.object(acousticbrainz, "run", lambda c, *a, **k: 0),
+                   mock.patch.object(qa, "run", lambda c, *a, **k: 0)]
+        with contextlib.ExitStack() as es:
+            for p in patches:
+                es.enter_context(p)
+            rc = pipeline.run(self.cfg)
+        self.assertEqual(rc, 0)                                    # best-effort: the run itself still returns 0
+        self.assertEqual(state.get_watermark(self.cfg), "2026-06-20T00:00:00")   # HELD, not advanced
+        self.assertNotEqual(state.get_progress(self.cfg), {})      # progress kept -> next run resumes + retries
+
     def test_upgrade_scan_gated_off_on_cron_path(self):
         # `gbc inbox` passes upgrade_scan=False: the costly full-source upgrade walk must NOT run on the cron door,
         # but every other pass still does. `gbc run` (default True) keeps it.

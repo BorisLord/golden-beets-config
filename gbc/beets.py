@@ -34,8 +34,8 @@ def run_beet(cfg: Config, args, *, overlay: str | None = None, passname: str,
             assert proc.stdout is not None
             for raw in proc.stdout:
                 line = raw.rstrip("\n")
-                lines.append(line)
-                if echo_lines and line.strip():
+                lines.append(line)                  # returned text keeps EVERY line (incl. blanks, for parsing)
+                if echo_lines and line.strip():     # the log skips blank lines only -- readability, not data
                     log.info("%s", line)
     except FileNotFoundError as e:
         raise RuntimeError(f"beet not found ({cfg.beet!r}) -- install beets or run ./setup.sh") from e

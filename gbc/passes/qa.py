@@ -10,7 +10,7 @@ from .. import anomaly
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
-from ..sidecars import quarantine_dir, safe_move
+from ..sidecars import quarantine_dir, safe_move, unique_dest
 from ..util import backup_db, prune_empty_dirs, skip_on_error
 
 JUNK = re.compile(r"https?://|www\.|\.(com|net|org|tk|br)|\bEAC\b|\bLame\b|\bLAMEB?\s*\d|CDex|Easy CD-DA|Tagged By"
@@ -64,9 +64,8 @@ def _container_mismatch(path):
 
 def _ffmpeg_corrupt(path) -> bool:
     """True iff ffmpeg FAILS to decode `path` (returncode != 0). Gates on the RETURN CODE, never stderr:
-    valid-but-exotic files emit harmless error-level noise (Opus prints a benign 'non monotonically increasing
-    dts' warning, ape/wv/dsf print other warnings) -- gating on stderr is what false-culled 657 good Opus.
-    -xerror aborts nonzero on the first real decode error (catches mid-file corruption too)."""
+    valid-but-exotic files emit harmless error noise (Opus 'non monotonically increasing dts', ape/wv/dsf
+    warnings) -- gating on stderr is what false-culled 657 good Opus. -xerror catches mid-file corruption too."""
     res = subprocess.run(["ffmpeg", "-nostdin", "-xerror", "-v", "error", "-i", str(path), "-f", "null", "-"],
                          capture_output=True, text=True)
     return res.returncode != 0
@@ -76,6 +75,12 @@ def _cull(cfg: Config, paths, log) -> int:
     """Move corrupt clean files to quarantine/corrupt/ (never deleted) and drop the lib entry. Identity from
     the clean path (already sanitised)."""
     backup_db(cfg, "qa-cull", log)
+    _, idp = run_beet(cfg, ["ls", "-f", "$id::::$path"], passname="qa", echo_lines=False)
+    path2id = {}                                   # exact path -> id, so we drop the culled row by id (not substring)
+    for ln in idp.splitlines():
+        parts = ln.split("::::", 1)
+        if len(parts) == 2:
+            path2id[parts[1]] = parts[0]
     moved = 0
     for p in dict.fromkeys(paths):                 # dedupe, keep order
         with skip_on_error(log, "qa-cull", p):
@@ -83,16 +88,16 @@ def _cull(cfg: Config, paths, log) -> int:
             if not fp.exists():
                 continue
             qd = quarantine_dir(cfg.dump, "corrupt", fp.parent.parent.name, fp.parent.name, fallback=fp.parent.name)
-            dest = qd / fp.name
-            i = 1
-            while dest.exists():
-                i += 1
-                dest = qd / f"{fp.stem} ({i}){fp.suffix}"
+            dest = unique_dest(qd, fp.name)
             qd.mkdir(parents=True, exist_ok=True)
             if safe_move(p, dest, log):
-                rc, _ = run_beet(cfg, ["remove", "-f", f"path:{p}"], passname="qa", echo_lines=False)
-                if rc:
-                    log.warning("qa: `beet remove` rc=%d for %s -- stale lib entry may remain", rc, p)
+                itemid = path2id.get(p)            # drop the lib row by id (`path:` is a fragile substring match)
+                if itemid:
+                    rc, _ = run_beet(cfg, ["remove", "-f", f"id:{itemid}"], passname="qa", echo_lines=False)
+                    if rc:
+                        log.warning("qa: `beet remove` rc=%d for id:%s -- stale lib entry may remain", rc, itemid)
+                else:                              # path not in the lib map -> quarantined but no row dropped
+                    log.warning("qa: no lib id for %s -- moved to quarantine, but a stale lib row may remain", p)
                 moved += 1
                 log.info("CULL corrupt: %s -> %s/", fp.name, qd)
     if moved:
@@ -136,9 +141,8 @@ def run(cfg: Config, scope: str = "", cull: bool = False) -> int:
     for x in dups[:40]:
         log.info("  %s", x)
 
-    # 6. integrity: beet bad + ffmpeg decode. Match the per-FILE marker badfiles prints ("checker exited with
-    #    status N" / "file does not exist") -- flac --test and mp3val emit DIFFERENT error text, so "ERROR:"
-    #    alone missed flac.
+    # 6. integrity: beet bad + ffmpeg decode. Match badfiles' per-FILE marker ("checker exited with status N" /
+    #    "file does not exist") -- flac --test and mp3val emit different error text, so "ERROR:" alone missed flac.
     bad = _lines(cfg, ["bad", *sc])
     fail = [x for x in bad if "checker exited with status" in x or "file does not exist" in x]
     baderr = len(fail)

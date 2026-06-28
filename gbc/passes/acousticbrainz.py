@@ -1,8 +1,7 @@
 """Pass -- network-only enrich via the AcousticBrainz read API (BPM, key, moods, danceability...).
 
-AB is frozen (no submissions since 2022) but its read API still serves every recording it analysed, keyed
-by mb_trackid. We hit it ourselves rather than beets' built-in `acousticbrainz` plugin (deprecated, may
-vanish). Best-effort: never gates the pipeline, never moves/deletes a file.
+AB is frozen but its read API still serves every recording it analysed, keyed by mb_trackid. We hit it
+ourselves (not beets' deprecated `acousticbrainz` plugin). Best-effort: never gates the pipeline or moves a file.
 """
 import importlib.util
 import json
@@ -17,6 +16,7 @@ from pathlib import Path
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
+from ..util import write_json
 
 API = "https://acousticbrainz.org/api/v1"
 BATCH = 25          # AB caps recording_ids at 25 per request
@@ -26,9 +26,8 @@ TIMEOUT = 25
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _UA = "gbc/0.8 (golden-beets-config)"   # default Python-urllib UA can be 403'd/throttled by the public API
 
-# No mediafile tag-frame mapping -> stored as db-only flex attrs, then injected into files as custom-tag
-# frames (TXXX / Vorbis comments / MP4 freeform atoms) so Navidrome can read them. The rest (bpm,
-# initial_key) are native media fields mediafile writes itself.
+# No mediafile tag-frame mapping -> db-only flex attrs, injected into files as custom tags (TXXX / Vorbis /
+# MP4 freeform) so Navidrome reads them. bpm/initial_key are native media fields mediafile writes itself.
 FLEX_ATTRS = frozenset({
     "danceable", "key_strength", "tonal",
     "mood_acoustic", "mood_aggressive", "mood_electronic", "mood_happy",
@@ -36,10 +35,9 @@ FLEX_ATTRS = frozenset({
     "moods_mirex", "voice_instrumental",
 })
 
-# AB nested JSON -> beets fields. Field names are beets' canonical ones (from the deprecated
-# beetsplug/acousticbrainz.py, so ecosystem queries still apply) but a CURATED SUBSET: genre/gender/timbre/
-# rhythm/chord/average_loudness noise deliberately dropped (see AGENTS.md). A leaf "value" takes the
-# classifier label; "all" takes the positive-class probability; a (attr, idx) tuple composes one field.
+# AB nested JSON -> beets fields. Names are beets' canonical ones (ecosystem queries still apply) but a
+# CURATED SUBSET (genre/gender/timbre/rhythm/chord/average_loudness dropped -- see AGENTS.md). Leaf "value" =
+# classifier label; "all" = positive-class probability; (attr, idx) tuple composes one field.
 ABSCHEME = {
     "highlevel": {
         "danceability": {"all": {"danceable": "danceable"}},
@@ -86,10 +84,13 @@ def _fields_for(doc: dict) -> dict:
     composites: dict = defaultdict(list)
     _walk(doc, ABSCHEME, out, composites)
     for attr, parts in composites.items():
-        if attr == "initial_key" and len(parts) == 2:
-            # beets' MusicalKey type wants canonical "C"/"Cm"/"C#"/"C#m", NOT "F# major": its regex
-            # `[\W\s]+major` eats the '#' -> "F". Emit canonical form so the sharp + mode survive.
-            root, scale = parts
+        if attr == "initial_key":
+            # beets' MusicalKey type wants canonical "C"/"Cm"/"C#"/"C#m", NOT "F# major" (its regex
+            # `[\W\s]+major` eats the '#' -> "F"). Emit canonical form so the sharp + mode survive.
+            root = parts[0] if parts else ""
+            if not root:                                   # a scale alone (key_scale, no key_key) is not a key -> drop
+                continue
+            scale = parts[1] if len(parts) > 1 else ""
             out[attr] = root + ("m" if scale.lower().startswith("min") else "")
         else:
             out[attr] = " ".join(parts).strip()
@@ -131,10 +132,8 @@ def _value(field: str, value):
 
 
 def _apply(cfg: Config, modified: dict, log) -> tuple[int, int]:
-    """Apply each recording the NATIVE way -- `beet modify -y -M mb_trackid:<uuid> field=value ...`. beets
-    writes the DB (native bpm/initial_key + flex attrs) AND the native tags to the file, logging any write
-    failure (no homemade try_write that drops a write silently). One modify per recording -- a recording can
-    sit on several albums, so the query updates all its items. Returns (applied, failed)."""
+    """Apply each recording natively via `beet modify -M mb_trackid:<uuid> field=value ...` (no homemade
+    try_write). One modify per recording -- a recording can sit on several albums. Returns (applied, failed)."""
     applied = failed = 0
     for mbid, fields in modified.items():
         assigns = [f"{k}={v}" for k, v in ((k, _value(k, v)) for k, v in fields.items()) if v is not None]
@@ -153,8 +152,8 @@ def _apply(cfg: Config, modified: dict, log) -> tuple[int, int]:
 def _write_file_tags(path: str, flex_attrs: dict, log) -> bool:
     """Inject flex attrs as custom tags via mutagen: TXXX (ID3), Vorbis comments, MP4 freeform atoms.
     Best-effort: failure logged and swallowed (never blocks the pipeline)."""
-    ext = path.rsplit(".", 1)[-1].lower()
-    audio: typing.Any = None        # a different mutagen type per format branch
+    ext = Path(path).suffix.lstrip(".").lower()    # from the basename, not the whole path (dotted dirs)
+    audio: typing.Any = None
     try:
         if ext in ("flac", "ogg", "opus"):
             if ext == "flac":
@@ -199,9 +198,8 @@ def run(cfg: Config, scope: str = "") -> int:
     """Enrich tracks in `scope` (whole library if empty). Returns the number of recordings enriched."""
     log = get_logger("acousticbrainz")
     sc = [scope] if scope else []
-    # Capture mbid->paths UP FRONT, in the same scoped query: the file-tag injection (below) must use these,
-    # NOT a re-query after applying -- writing bpm would invalidate a scope that filters on bpm (e.g. "^bpm:1..")
-    # and silently tag 0 files. One row per (recording, album), so a recording can map to several paths.
+    # Capture mbid->paths UP FRONT: a re-query after applying would miss files when scope filters on bpm
+    # (writing bpm empties such a scope -> 0 files tagged). One row per (recording, album) -> several paths.
     _, text = run_beet(cfg, ["ls", "-f", "$mb_trackid\t$path", "mb_trackid::.", *sc],
                        passname="acousticbrainz", echo_lines=False)
     paths_by_mbid: dict = {}
@@ -236,8 +234,7 @@ def run(cfg: Config, scope: str = "") -> int:
             except Exception as e:                             # a single malformed AB doc must not abort the batch
                 log.warning("acousticbrainz: parse failed for %s (%s) -> treated as absent", m, e)
                 cache[m] = None
-        cfg.beetsdir.mkdir(parents=True, exist_ok=True)
-        cpath.write_text(json.dumps(cache), encoding="utf-8")
+        write_json(cpath, cache)                           # atomic (tmp + replace): a crash can't corrupt the cache
 
     # Cached recordings are re-applied every run (not just freshly-fetched): a newly-added item sharing a
     # recording id with a cached one still gets enriched. Watermark keeps `*sc` narrow; `--all` re-applies all.
@@ -254,23 +251,24 @@ def run(cfg: Config, scope: str = "") -> int:
         applied, failed = _apply(cfg, modified, log)
         log.info("acousticbrainz: %d recording(s) applied via beet modify (%d failed)", applied, failed)
 
-        # native reconciliation: a final `beet write` over the SAME scope guarantees bpm/initial_key reached
-        # every enriched file -- it rewrites only files whose tags drifted from the DB (so it's a near no-op
-        # unless a modify-write failed), closing the gap that left bpm in the DB but not the file. The scope is
-        # time-based in the pipeline (`added:..`), so the just-enriched items still match it. Runs BEFORE the
-        # mutagen step so moods are the last write.
-        run_beet(cfg, ["write", *sc], passname="acousticbrainz", echo_lines=False)
+        # `beet write` reconciles bpm/initial_key to every enriched FILE (near no-op unless a modify-write
+        # failed). Scope to the just-modified recordings, else a standalone/--all run rewrites the WHOLE library.
+        if sc:
+            wargs = ["write", *sc]
+        else:
+            wargs = ["write"]
+            for m in modified:                 # mb_trackid is a UUID -> a bare `mb_trackid:` query can't collide
+                wargs += ([","] if len(wargs) > 1 else []) + [f"mb_trackid:{m}"]
+        run_beet(cfg, wargs, passname="acousticbrainz", echo_lines=False)
 
-        # moods/flex -> file tags via mutagen: beets has NO native command to write flex attrs to file tags, so
-        # this one custom path stays. Uses the paths captured up front (paths_by_mbid).
+        # moods/flex -> file tags via mutagen: beets has no native command to write flex attrs to files.
         if importlib.util.find_spec("mutagen") is not None:
             tagged = 0
             for mbid in modified:
                 flex = {k: v for k, v in modified[mbid].items() if k in FLEX_ATTRS}
                 if not flex:
                     continue
-                for path in paths_by_mbid.get(mbid, []):
-                    path = path.encode("utf-8", "surrogateescape").decode("utf-8", "surrogateescape")
+                for path in paths_by_mbid.get(mbid, []):   # already surrogateescape-decoded by run_beet
                     if Path(path).is_file() and _write_file_tags(path, flex, log):
                         tagged += 1
             log.info("acousticbrainz: %d file(s) tagged with flex attrs", tagged)

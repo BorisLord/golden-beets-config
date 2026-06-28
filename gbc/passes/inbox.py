@@ -29,14 +29,16 @@ def has_new(plan: str) -> bool:
     return bool(re.search(r"(?m)^(Album|Singleton):", plan))
 
 
-def _debounce(cfg: Config, interval: int = 20, max_wait: int = 1800) -> None:
-    """Wait until source size is stable across two samples (drop finished copying), capped at `max_wait`s so
-    a continuously-growing source can't wedge the import lock forever."""
-    prev = -1
+def _debounce(cfg: Config, interval: int = 20, max_wait: int = 1800, need_stable: int = 2) -> None:
+    """Wait until source size holds steady across `need_stable` CONSECUTIVE samples (the drop finished copying),
+    capped at `max_wait`s so a continuously-growing source can't wedge the import lock forever. Requiring >1 stable
+    reading guards a slow/stalled transfer that pauses >=interval mid-copy from reading falsely 'done'."""
+    prev, stable = -1, 0
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
         cur = _dir_size(cfg.src)
-        if cur == prev:
+        stable = stable + 1 if cur == prev else 0
+        if stable >= need_stable:
             return
         prev = cur
         time.sleep(interval)

@@ -1,15 +1,10 @@
 """TEMPORARY one-off recovery -- re-merge the FALSE imposters the OLD verify over-quarantined.
 
-The refined `verify` now keeps same-song siblings (credit/edition variants) and only flags on POSITIVE
-evidence (the audio confidently matches a different recording). The existing `quarantine/imposters/` is
-therefore full of tracks that should never have left clean. This pass moves each quarantined album back into
-its clean album and re-imports it as-is; the NEXT `gbc run`'s (refined) verify then re-filters -- the
-genuinely-wrong tracks return to quarantine, the false positives stay as complete albums. So no manual
-false-vs-real sorting.
+The refined `verify` now keeps same-song siblings and only flags on POSITIVE evidence, so `quarantine/imposters/`
+is full of tracks that should never have left clean. This moves each quarantined album back into clean and
+re-imports it; the next `gbc run`'s verify re-filters (genuinely-wrong tracks return, false positives stay).
 
-REMOVE THIS once `quarantine/imposters/` has been restored -- it is NOT needed for normal operation.
-Detachable like nova: delete this file + the guarded `restore_imposters` lines in cli.py and the command is
-gone (nothing else imports it).
+REMOVE once `quarantine/imposters/` is restored. Detachable: delete this file + the guarded lines in cli.py.
 """
 import os
 import re
@@ -21,7 +16,7 @@ import mediafile
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
-from ..sidecars import AUDIO, safe_move
+from ..sidecars import AUDIO, safe_move, unique_dest
 from ..util import backup_db, prune_empty_dirs, skip_on_error
 
 
@@ -46,9 +41,15 @@ def _read_albumid(audio_files):
     return ("", "")
 
 
+def _albumid_q(albumid: str) -> str:
+    """EXACT-match query for an mb_albumid. A bare `mb_albumid:1234` is a SUBSTRING match (also hits 12345/51234 --
+    Discogs ids are bare integers), and the `remove -a`/`move -a` below are irreversible on whatever matches."""
+    return f"mb_albumid::^{re.escape(albumid)}$"
+
+
 def _clean_album_dir(cfg: Config, albumid: str):
     """The clean album folder for `mb_albumid` (parent of one of its items), or None if it's not in clean."""
-    _, text = run_beet(cfg, ["ls", f"mb_albumid:{albumid}", "-f", "$path"],
+    _, text = run_beet(cfg, ["ls", _albumid_q(albumid), "-f", "$path"],
                        passname="restore-imposters", echo_lines=False)
     for line in text.splitlines():
         if line.strip():
@@ -64,9 +65,8 @@ def run(cfg: Config, apply: bool = False) -> int:
         log.info("restore-imposters: no %s -> nothing to do", root)
         return 0
 
-    # Re-import WITHOUT the on-import plugins: fetchart/replaygain/lastgenre already ran on the original import,
-    # re-running them is pointless and fetchart's web fetch can HANG with no timeout. A `plugins: []` overlay
-    # (passed via `beet -c`) disables them, so the restore just re-adds the files fast.
+    # Re-import WITHOUT on-import plugins (`plugins: []` overlay): they already ran on the original import, and
+    # fetchart's web fetch can HANG with no timeout. So the restore just re-adds the files fast.
     noplugins = cfg.beetsdir / ".gbc-restore-noplugins.yaml"
     if apply:
         cfg.beetsdir.mkdir(parents=True, exist_ok=True)
@@ -91,31 +91,30 @@ def run(cfg: Config, apply: bool = False) -> int:
                 backed = True
             clean_dir = _clean_album_dir(cfg, albumid)
             if clean_dir is not None and clean_dir.is_dir():
-                # partial: album still in clean (missing these tracks) -> drop them back IN, drop the lib album
-                # (keep files), re-import the now-complete folder as-is.
-                # The original import set comp=True in the DB (NOT the file tags); a plain -A re-import loses it
-                # and mis-routes a VA comp to 'Various Artists/' instead of '_Various Artists/'. Capture + restore.
-                _, ct = run_beet(cfg, ["ls", "-a", "comp:1", f"mb_albumid:{albumid}", "-f", "$id"],
+                # partial: album still in clean (missing these tracks) -> drop them back IN, drop the lib album,
+                # re-import as-is. comp=True lived in the DB not the tags; a plain -A loses it and mis-routes a VA
+                # comp to 'Various Artists/' not '_Various Artists/' -> capture + restore it.
+                _, ct = run_beet(cfg, ["ls", "-a", "comp:1", _albumid_q(albumid), "-f", "$id"],
                                  passname="restore-imposters", echo_lines=False)
                 was_comp = bool(ct.strip())
-                moved = [p for p in audio if safe_move(p, clean_dir / Path(p).name, log)]
+                moved = [p for p in audio if safe_move(p, unique_dest(clean_dir, Path(p).name), log)]
                 if not moved:
                     continue
-                run_beet(cfg, ["remove", "-a", "-f", f"mb_albumid:{albumid}"],
+                run_beet(cfg, ["remove", "-a", "-f", _albumid_q(albumid)],
                          passname="restore-imposters", echo_lines=False)
                 run_beet(cfg, ["-c", str(noplugins), "import", "-q", "-I", "-A", "--flat", str(clean_dir)],
                          passname="restore-imposters")
                 if was_comp:                                  # re-apply the lost comp normalisation + re-route
-                    run_beet(cfg, ["modify", "-a", "-y", f"mb_albumid:{albumid}", "comp=1"],
+                    run_beet(cfg, ["modify", "-a", "-y", _albumid_q(albumid), "comp=1"],
                              passname="restore-imposters", echo_lines=False)
-                    run_beet(cfg, ["move", "-a", f"mb_albumid:{albumid}"],
+                    run_beet(cfg, ["move", "-a", _albumid_q(albumid)],
                              passname="restore-imposters", echo_lines=False)
                 target = clean_dir.name
             else:
                 # whole album was quarantined -> stage + import; beets routes it into clean via the path templates.
                 staging = cfg.beetsdir / ".gbc-restore" / re.sub(r"[^\w.-]", "_", albumid)
                 staging.mkdir(parents=True, exist_ok=True)
-                moved = [p for p in audio if safe_move(p, staging / Path(p).name, log)]
+                moved = [p for p in audio if safe_move(p, unique_dest(staging, Path(p).name), log)]
                 if not moved:
                     continue
                 run_beet(cfg, ["-c", str(noplugins), "import", "-q", "-I", "-A", "--flat", str(staging)],

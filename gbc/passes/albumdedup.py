@@ -18,9 +18,8 @@ from ..util import backup_db, length_secs, prune_empty_dirs
 
 SEP = "\x1f"
 MINTRACKS = 3   # >=3: same artist + count + all within TOL between DISTINCT albums is ~nil
-TOL = 35        # seconds/track: same album, different rip drifts ~30s/track (measured IAM 30, BBC 22, De
-                # Palmas 14); a different album far more (Deep Purple vs in Rock 136). Per-track, not total
-                # (different albums can share a total).
+TOL = 35        # seconds/track: same album different rip drifts ~30s/track (measured IAM 30, BBC 22); a
+                # different album far more (Deep Purple vs in Rock 136). Per-track, not total (totals collide).
 _NUMWORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7",
              "eight": "8", "nine": "9", "ten": "10", "eleven": "11", "twelve": "12",
              "ii": "2", "iii": "3", "iv": "4", "vi": "6", "vii": "7", "viii": "8", "ix": "9"}
@@ -118,7 +117,7 @@ def run(cfg: Config, *, do_apply: bool = True) -> int:
             if folder.resolve() == keeper_folder:   # shared dir -> moving the loser would take the keeper's tracks
                 log.warning("albumdedup: skip id:%s -- shares folder with keeper (%s)", aid, folder)
                 continue
-            qd = quarantine_dir(cfg.dump, "duplicates", a["artist"])   # duplicates/<Artist>/ ; folder = "Album (Year)"
+            qd = quarantine_dir(cfg.dump, "duplicates", folder.parent.name)   # mirror clean's folder layout
             dest = qd / folder.name
             n = 1
             while dest.exists():

@@ -47,8 +47,8 @@ class TestRestoreImposters(Base):
              mock.patch.object(restore_imposters, "prune_empty_dirs", lambda *a, **k: None):
             n = restore_imposters.run(self.cfg, apply=True)
         self.assertEqual(n, 1)
-        # incomplete album dropped (album query, files kept) then the complete folder re-imported
-        self.assertTrue(any(a[0] == "remove" and "-a" in a and "mb_albumid:albID" in a for a in beet))
+        # incomplete album dropped (ANCHORED album query, files kept) then the complete folder re-imported
+        self.assertTrue(any(a[0] == "remove" and "-a" in a and "mb_albumid::^albID$" in a for a in beet))
         self.assertTrue(any("import" in a for a in beet))
 
     def test_apply_va_comp_preserved(self):

@@ -4,9 +4,8 @@ clean DUP-SKIP by mb_trackid, so only genuinely-loose fragments are added.
 
 Then two reassembly steps run (dry unless --apply):
   1. nova.reroute() -- OPT-IN/detachable: re-tag dispersed Nova-compilation tracks to their compil (Nova first).
-  2. _promote_complete() -- GENERAL: any album/compil/soundtrack whose ENTIRE MusicBrainz tracklist is now
-     present as singletons is re-imported as a real album, so beets routes it out of _Singles/ into
-     <artist>/ | _Various Artists/ | _Soundtracks/ per the paths rules. Incomplete sets stay in _Singles/.
+  2. _promote_complete() -- any album whose ENTIRE MusicBrainz tracklist is now present as singletons is
+     re-imported as a real album, routed out of _Singles/ per the paths rules. Incomplete sets stay.
 
 NOT part of `gbc run` (which stays album-only by design); run it deliberately with `gbc singletons`.
 """
@@ -20,7 +19,7 @@ from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
 from ..mb import release_recordings
-from ..sidecars import safe_move
+from ..sidecars import safe_move, unique_dest
 from ..util import backup_db, count_items, prune_empty_dirs
 
 try:                                  # Nova is OPT-IN + detachable: deleting nova.py just disables the re-tag
@@ -107,8 +106,10 @@ def _assemble_album(cfg: Config, albumid: str, items, log, apply: bool) -> bool:
         return True
     staging = cfg.beetsdir / ".gbc-assemble" / re.sub(r"[^\w.-]", "_", albumid)
     staging.mkdir(parents=True, exist_ok=True)
-    moved = [sid for sid, _tid, path in items
-             if Path(path).exists() and safe_move(path, staging / Path(path).name, log)]
+    moved = []
+    for sid, _tid, path in items:                     # de-collide same-basename tracks (VA comps) -> never overwrite
+        if Path(path).exists() and safe_move(path, unique_dest(staging, Path(path).name), log):
+            moved.append(sid)
     if not moved:
         log.warning("  promote %s: no files moved -> skipped", label)
         return False

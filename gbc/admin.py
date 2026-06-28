@@ -3,12 +3,13 @@
 init: config.env + dirs + deploy beets/*.yaml into BEETSDIR (filling `directory:`/`log:`), optional cron.
 uninstall: remove cron entry, logs, config.env, and (with --purge) the beets config dir + catalog.
 """
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from .config import REPO_ROOT, Config, config_path, load, read_api_keys
+from .config import API_KEYS, REPO_ROOT, Config, config_path, load, read_api_keys
 from .logs import get_logger
 
 CRON_MARK = "gbc inbox"
@@ -43,11 +44,17 @@ def init(cfg: Config, cron: bool = False) -> int:
             for field, val in keys.items():            # line-anchored: only the field assignment, not a comment
                 text = re.sub(rf"(?m)^(\s*{re.escape(field)}:\s*)REPLACE_ME\s*$",
                               r"\g<1>" + val.replace("\\", r"\\"), text)
-        (cfg.beetsdir / y.name).write_text(text, encoding="utf-8")
+        dest = cfg.beetsdir / y.name
+        if y.name == "config.yaml":                # real API keys -> create 0600 from the start, never world-readable
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        else:
+            dest.write_text(text, encoding="utf-8")
     nkeys = len(read_api_keys())
     log.info("deployed beets/*.yaml -> %s (directory + import log%s filled)",
              cfg.beetsdir, f" + {nkeys} API key(s)" if nkeys else "")
-    if nkeys < len(("discogs", "lastfm", "fanarttv")):
+    if nkeys < len(API_KEYS):
         log.info("optional: set DISCOGS_TOKEN / LASTFM_KEY / FANARTTV_KEY in config.env for online match/art/genres")
 
     if cron:

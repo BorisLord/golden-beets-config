@@ -17,6 +17,7 @@ from .. import mb
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
+from ..util import write_json
 
 CACHE = "gbc-nova-cache.json"
 SERIES = {                                       # MusicBrainz release-group series (the canonical Nova index)
@@ -52,7 +53,7 @@ def _build_cache(cfg: Config, log) -> dict:
                 cache[rec["id"]] = {"compil": compil, "track": t.get("position"),
                                     "total": len(tracks), "albumid": albumid}
     cfg.beetsdir.mkdir(parents=True, exist_ok=True)
-    (cfg.beetsdir / CACHE).write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    write_json(cfg.beetsdir / CACHE, cache)                # atomic (tmp + replace): a crash can't corrupt the cache
     log.info("nova: cached %d recording(s) across %d compils", len(cache), len(rgs))
     return cache
 
@@ -84,11 +85,12 @@ def reroute(cfg: Config, log, apply: bool, refresh: bool = False) -> int:
         log.info("nova: %d loose Nova track(s) would be re-tagged to their compil", len(todo))
         return len(todo)
     for sid, info in todo:                       # per-item: scope by id so an album copy of the same recording
-        run_beet(cfg, ["modify", "-y", f"id:{sid}",          # (no-dup case) is never touched
-                       f"mb_albumid={info['albumid']}", f"album={info['compil']}",
-                       "albumartist=Various Artists", "comp=1",
-                       f"track={info['track']}", f"tracktotal={info['total']}"],
-                 passname="nova", echo_lines=False)
+        args = ["modify", "-y", f"id:{sid}",                  # (no-dup case) is never touched
+                f"mb_albumid={info['albumid']}", f"album={info['compil']}",
+                "albumartist=Various Artists", "comp=1"]
+        if info.get("track") is not None:        # MB `position` can be missing -> don't write the literal "None"
+            args += [f"track={info['track']}", f"tracktotal={info['total']}"]
+        run_beet(cfg, args, passname="nova", echo_lines=False)
     log.info("nova: re-tagged %d loose Nova track(s) -> their compil", len(todo))
     return len(todo)
 

@@ -1,9 +1,8 @@
 """The pipeline: import -> upgrade -> albumdedup -> convert -> verify -> acousticbrainz -> qa.
-`run` + `inbox` (cron) both call it; the trigger differs and the cron door skips the costly upgrade
-full-source scan (`upgrade_scan=False`). Ordering is load-bearing: upgrade right after
-import (it acts on copies this import dup-skipped) and before albumdedup; albumdedup needs only import metadata
-so later expensive passes skip quarantined albums; convert BEFORE verify so every later pass runs identically
-on the converted (WMA->Opus, WAV/AIFF->FLAC) files.
+`run` + `inbox` (cron) both call it; the cron door skips the costly upgrade full-source scan
+(`upgrade_scan=False`). Ordering is load-bearing: upgrade right after import (it acts on copies this import
+dup-skipped), albumdedup before the expensive passes (they skip quarantined albums), convert BEFORE verify so
+every later pass runs identically on the converted files.
 """
 from datetime import datetime
 
@@ -40,7 +39,6 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, up
     elif "import" not in done:
         rc = import_.run(cfg, src=src, reimport=reimport)
         if rc:
-            # fail-fast: watermark NOT advanced so the next run retries this run's items
             log.error("pipeline ABORTED: import failed (rc=%d) -- watermark NOT advanced, will retry next run", rc)
             return rc
         done.add("import")
@@ -52,8 +50,12 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, up
         wm_new = datetime.now().replace(microsecond=0).isoformat()
         _save()
 
-    # every post-import pass is best-effort: a hiccup must never break the import or block the watermark advance
+    # post-import passes are best-effort (a hiccup never breaks the IMPORT), but a pass that ERRORS leaves its window
+    # unprocessed -> HOLD the watermark so the next run re-scopes that window and re-runs only the failed pass.
+    failed = False
+
     def _phase(name: str, fn) -> None:
+        nonlocal failed
         if name in done:
             log.info("pipeline: skip %s (already done this run)", name)
             return
@@ -61,7 +63,8 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, up
             fn()
         except Exception:
             log.exception("%s pass errored (non-fatal)", name)
-            return                          # NOT marked done on failure -> a resume re-runs it (file-moving passes)
+            failed = True                   # don't advance the watermark this run -> re-scoped + retried next run
+            return
         done.add(name)
         _save()
 
@@ -82,7 +85,11 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, up
     _phase("acousticbrainz", lambda: acousticbrainz.run(cfg, scope=scope))
     _phase("qa", lambda: qa.run(cfg, scope=scope, cull=True))
 
-    state.set_watermark(cfg, wm_new)
-    state.clear_progress(cfg)                # run finished cleanly -> no resume state to keep
-    log.info("pipeline done; watermark -> %s", wm_new)
+    if failed:                               # keep wm_old + the progress file: the next run resumes (done passes
+        log.warning("pipeline: a post-import pass errored -> watermark HELD at %s; window retried next run",
+                    wm_old or "initial")     # skipped) and re-runs the failed pass on the same window
+    else:
+        state.set_watermark(cfg, wm_new)
+        state.clear_progress(cfg)            # run finished cleanly -> no resume state to keep
+        log.info("pipeline done; watermark -> %s", wm_new)
     return 0

@@ -1,7 +1,9 @@
 """Small shared helpers for the passes."""
 import contextlib
+import json
 import os
 import shutil
+import tempfile
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +35,21 @@ def backup_db(cfg: Config, tag: str, log) -> None:
             if side.exists():
                 shutil.copy2(side, dest.with_name(dest.name + ext))
         log.info("backup %s -> %s", lib.name, dest.name)
+
+
+def write_json(path, obj) -> None:
+    """Atomically write `obj` as JSON to `path` (sibling tmp + os.replace), so a crash/ENOSPC mid-write can't
+    corrupt the file and silently discard a hard-won cache. Mirrors state.py's atomic progress/watermark write."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, ensure_ascii=False)
+        Path(tmp).replace(path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def length_secs(s: str) -> int:
