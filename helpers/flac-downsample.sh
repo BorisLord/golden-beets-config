@@ -8,16 +8,19 @@
 # Args: $1=source $2=dest.
 src="$1"
 dst="$2"
-sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$src" 2>/dev/null)
+# tr -dc 0-9: some ffprobe builds emit "192000," (trailing comma) for files with an embedded picture stream;
+# a bare comparison would miss the case and SKIP the rate reduction. Keep digits only.
+sr=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$src" 2>/dev/null | tr -dc '0-9')
 case "$sr" in
-    88200|176400|352800) tsr=44100 ;;   # 44.1 kHz family
-    96000|192000|384000) tsr=48000 ;;   # 48 kHz family
+    88200|176400|352800) tsr=44100 ;;   # 44.1 kHz family -> integer-ratio decimation (4:1 / 2:1)
+    96000|192000|384000) tsr=48000 ;;   # 48 kHz family   -> integer-ratio decimation
     *) tsr="${sr:-44100}" ;;            # already <=48k (or unreadable): keep the rate, only drop depth to 16-bit
 esac
 # -vn + -map_metadata -1: drop any source cover stream + container tags; beets re-tags + re-embeds art after
-# keep_new. soxr precision 28 + dithered conversion to s16 = transparent down-conversion.
+# keep_new. soxr VHQ (precision 28) + TPDF dither (triangular_hp; ffmpeg's default is the weaker rectangular)
+# down to s16 = transparent down-conversion.
 ffmpeg -v error -i "$src" -y -vn -map_metadata -1 \
-    -af "aresample=resampler=soxr:precision=28:osr=$tsr" -sample_fmt s16 \
+    -af "aresample=resampler=soxr:precision=28:osr=$tsr:dither_method=triangular_hp" -sample_fmt s16 \
     -acodec flac "$dst" || exit 1
 if [ ! -s "$dst" ] || ! ffmpeg -v error -xerror -i "$dst" -f null - >/dev/null 2>&1; then
     rm -f "$dst"
