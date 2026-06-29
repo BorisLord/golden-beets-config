@@ -45,10 +45,11 @@ def init(cfg: Config, cron: bool = False) -> int:
                 text = re.sub(rf"(?m)^(\s*{re.escape(field)}:\s*)REPLACE_ME\s*$",
                               r"\g<1>" + val.replace("\\", r"\\"), text)
         dest = cfg.beetsdir / y.name
-        if y.name == "config.yaml":                # real API keys -> create 0600 from the start, never world-readable
+        if y.name == "config.yaml":                # real API keys -> 0600, never world-readable
             fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(text)
+            dest.chmod(0o600)                      # O_CREAT mode is ignored if the file pre-existed -> enforce it
         else:
             dest.write_text(text, encoding="utf-8")
     nkeys = len(read_api_keys())
