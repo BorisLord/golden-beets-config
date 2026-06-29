@@ -39,3 +39,19 @@ def release_recordings(albumid: str) -> frozenset:
     return frozenset(t["recording"]["id"]
                      for m in data.get("media", []) for t in m.get("tracks", [])
                      if t.get("recording", {}).get("id"))
+
+
+def missing_recordings(albumid: str, present_trackids, cache: dict | None = None):
+    """The release's recordings NOT present in `present_trackids`, or None if the tracklist can't be fetched
+    (caller leaves the album alone). Empty frozenset = the album is COMPLETE. `cache` (albumid -> recordings)
+    avoids re-fetching the same release across albums. Shared by verify (demote incomplete) + singletons
+    (promote complete) so both judge completeness against the live MB tracklist the same way."""
+    if cache is not None and albumid in cache:
+        official = cache[albumid]
+    else:
+        official = release_recordings(albumid)
+        if cache is not None:
+            cache[albumid] = official
+    if not official:
+        return None
+    return official - frozenset(present_trackids)
