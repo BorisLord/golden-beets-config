@@ -10,7 +10,7 @@ from datetime import datetime
 from .. import state
 from ..config import Config
 from ..logs import get_logger
-from . import acousticbrainz, albumdedup, convert, import_, qa, upgrade, verify
+from . import acousticbrainz, albumdedup, convert, import_, junk, qa, upgrade, verify
 
 
 def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, upgrade_scan: bool = True,
@@ -88,6 +88,7 @@ def run(cfg: Config, *, full: bool = False, src=None, reimport: bool = False, up
         log.info("pipeline: skip upgrade (cron path -- full-source scan runs on `gbc run`)")
     _phase("albumdedup", lambda: albumdedup.run(cfg))
     _phase("convert", _convert)
+    _phase("junk", lambda: junk.run(cfg, scope=scope, apply=True))   # strip rip-site/junk tag values
     _phase("verify", lambda: verify.run(cfg, scope=scope, refresh=full))
     _phase("acousticbrainz", lambda: acousticbrainz.run(cfg, scope=scope))
     _phase("qa", lambda: qa.run(cfg, scope=scope, cull=True))

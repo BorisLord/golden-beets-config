@@ -1,0 +1,46 @@
+# gbc junk-tag patterns -- one case-insensitive regex per line ('#' comments + blank lines ignored).
+# Read FRESH each run by the `junk` pass; any VALUE of comments / grouping / composer / lyricist / lyrics /
+# encoder / albumdisambig that MATCHES a line gets blanked. Identity tags (title/artist/album/albumartist) are
+# NEVER touched. Keep patterns SPECIFIC -- a too-broad pattern (e.g. a bare '@') would nuke legit text such as
+# "Bowie @ the BBC". Add your own here, or in $BEETSDIR/junk_patterns.txt (also read each run).
+
+# --- URLs ---
+https?://\S+
+www\.\S+
+
+# --- bare rip/leak-site domains (no scheme): rnbxclusive.se, sinmasmp3.tk, soulection.com, collection.by.ru ---
+\b[\w-]{2,}\.(com|net|org|info|biz|se|ru|tk|cc|to|me|us)\b
+
+# --- rip / encode signatures (greedy to end-of-line: the whole "ripped/encoded by X" phrase is junk) ---
+\bripped\s+(by|from)\b.*
+\bencoded\s+(by|for)\b.*
+\bmp3\s*producer\b.*
+easy cd-?da extractor.*
+
+# --- scene / uploader decoration tags (two ':: ' groups + their '.' decoration, or '@@@', or '@+') ---
+\.*::.*::\.*
+@@@
+@\+
+
+# --- leaked raw ID3 fields dumped into the comment (e.g. "YEAR: 1968 ID3G: 115") ---
+\bID3G\b.*
+\bYEAR:\s*\d{4}\b
+
+# --- named leak sites (the bare-domain rule above also catches these; listed for sigs without a TLD) ---
+rnbxclusive
+hotreleases
+file24ever
+verycd
+datpiff
+livemixtap
+hotnewhiphop
+
+# --- known uploader/group handles (curated -- ANCHORED to the whole value so they never hit legit text;
+#     add the exact junk sigs you spot here) ---
+^SoB$
+^From EEZ Land$
+^YOU HAVE A FATHEAD$
+^rock that shit$
+^S006$
+^USC©\d+$
+^eMF®.*

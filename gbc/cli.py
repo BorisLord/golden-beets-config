@@ -7,7 +7,20 @@ from . import admin
 from . import config as configmod
 from .lock import import_lock
 from .logs import configure
-from .passes import acousticbrainz, albumdedup, convert, import_, inbox, nova, pipeline, qa, singletons, upgrade, verify
+from .passes import (
+    acousticbrainz,
+    albumdedup,
+    convert,
+    import_,
+    inbox,
+    junk,
+    nova,
+    pipeline,
+    qa,
+    singletons,
+    upgrade,
+    verify,
+)
 
 restore_imposters: ModuleType | None
 try:                                  # TEMPORARY/detachable -- delete restore_imposters.py to remove the command
@@ -43,6 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
     pab = sub.add_parser("acousticbrainz", help="fetch BPM/key/mood metadata from AcousticBrainz")
     pab.add_argument("query", nargs="?", default="", help="scope query (default: whole library)")
     sub.add_parser("convert", help="normalise formats (WMA->Opus, WAV/AIFF->FLAC; originals -> quarantine)")
+    pj = sub.add_parser("junk", help="strip rip-site/junk tag values (data-driven: junk_patterns.txt)")
+    pj.add_argument("query", nargs="?", default="", help="scope query (default: whole library)")
+    pj.add_argument("--apply", action="store_true", help="write the changes (default: dry-run preview)")
     pad = sub.add_parser("albumdedup", help="quarantine cross-source duplicate albums (keep the best-quality copy)")
     pad.add_argument("--pretend", action="store_true", help="report only (default: move the duplicates to quarantine)")
     pnv = sub.add_parser("nova", help="[detachable] classify reconstructable Radio-Nova compils from the library")
@@ -105,6 +121,9 @@ def main(argv=None) -> int:
     if args.cmd == "convert":
         with import_lock(cfg, blocking=True):
             return convert.run(cfg)
+    if args.cmd == "junk":                              # strips tag values via beet modify -> serialise vs the cron
+        with import_lock(cfg, blocking=True):
+            return _ok(junk.run(cfg, scope=args.query, apply=args.apply))
     if args.cmd == "albumdedup":
         with import_lock(cfg, blocking=True):
             return _ok(albumdedup.run(cfg, do_apply=not args.pretend))
