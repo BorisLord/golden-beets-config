@@ -1,11 +1,12 @@
 # golden-beets-config
 
 Turn a chaotic music library — tens of thousands of loose, mis-tagged files — into a clean **album** library
-for any player (Navidrome, Jellyfin, Plex, Subsonic/DLNA). A documented [beets](https://beets.io) config for
-album-mode recovery, wrapped by a small Python CLI (`gbc`) that adds the orchestration a config can't express
-(dedup, sidecars, QA, format conversion, quality upgrades). Albums are matched by **AcoustID fingerprint** +
-tags, so duplicate track numbers, download-batch folders and untitled rips don't matter — the folder structure
-is ignored.
+for any player (Navidrome, Jellyfin, Plex, Subsonic/DLNA), then **keep it that way**: drop a new album or a
+loose track into the source and the cron imports, tags and files it for you. A documented [beets](https://beets.io)
+config for album-mode recovery, wrapped by a small Python CLI (`gbc`) that adds the orchestration a config can't
+express (dedup, sidecars, QA, format conversion, quality upgrades). Albums are matched by **AcoustID
+fingerprint** + tags, so duplicate track numbers, download-batch folders and untitled rips don't matter — the
+folder structure is ignored.
 
 ## The config
 
@@ -27,6 +28,27 @@ gbc run        # the pipeline (incremental)
 By default everything lives under `~/Music/beetsPipeline/` (`source/`, `clean/`, `quarantine/`, `logs/`). Drop
 **album folders** in `source/` — matched albums go to `clean/` (moved or copied per beets `import.move`/`copy`),
 the rest stay in `source/` to curate. Change paths in `config.env` (created by setup) and re-run `./setup.sh`.
+
+## Processing a library
+
+The end-to-end recipe, from a chaotic source to a self-maintaining clean library:
+
+1. **`gbc run`** — match and file every complete, strong **album**. Loose, mis-tagged or incomplete tracks
+   stay in `source/` (album mode never guesses).
+2. **`gbc singletons --apply`** — fingerprint those leftovers (audio = source of truth), file what's identified
+   as singletons under `_Singles/`, and **promote** any set that now forms a complete MusicBrainz album back into
+   a real album in `clean/`. What AcoustID can't identify is left in `source/` as the curation backlog. (Opt-in
+   because it moves files out of the source — that's why it isn't in `gbc run`.)
+3. **`gbc run`** again — the tracks recovered in step 2 are now in scope, so verify / acousticbrainz / qa /
+   convert apply the same passes to them as to albums (`singletons` re-tags + imports but doesn't run those
+   passes itself).
+4. **Enable the cron** (`gbc init --cron`) — from here on `gbc inbox` every 15 min imports any new drop and runs
+   the full pipeline, so steps 1 and 3 happen on their own.
+5. **Occasionally** re-run `gbc singletons --apply` by hand. The cron does everything else; this stays the one
+   manual step (it's the only pass that consumes the source backlog).
+
+Order matters: run singletons **before** the second `gbc run` so the recovered tracks get the full QA +
+enrichment treatment; the cron then keeps the album library current without further intervention.
 
 ## Commands
 
