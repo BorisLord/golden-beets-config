@@ -6,6 +6,11 @@ truth -- and re-tagged to that recording, so the import matches it instead of sk
 (MB/Discogs/Deezer/Bandcamp) corroborates at import time. What AcoustID can't identify is LEFT IN PLACE (the
 default-skip import keeps it in the source = the curation backlog); nothing is force-tagged.
 
+MOVE-vs-COPY (beets' call): a CONSUMED source (move/delete) is re-tagged IN PLACE, originals first saved to
+`gbc-singletons-retag-backup.jsonl`; a PRESERVED source is NEVER mutated -- copy/reflink/hardlink re-tag
+throwaway COPIES in a staging dir, symlink/in-place skip source recovery (the library references the original
+file, so it can't be staged). Quarantined imposters are gbc-owned -> always re-tagged in place.
+
 Then two reassembly steps run (dry unless --apply):
   1. nova.reroute() -- OPT-IN/detachable: re-tag dispersed Nova-compilation tracks to their compil (Nova first).
   2. _promote_complete() -- any album whose ENTIRE MusicBrainz tracklist is now present as singletons is
@@ -13,12 +18,14 @@ Then two reassembly steps run (dry unless --apply):
 
 NOT part of `gbc run` (which stays album-only by design); run it deliberately with `gbc singletons`.
 """
+import json
 import re
+import shutil
 from collections import defaultdict
 from contextlib import suppress
 from pathlib import Path
 
-from .. import artfix
+from .. import artfix, beetscfg
 from ..beets import run_beet
 from ..config import Config
 from ..logs import get_logger
@@ -39,38 +46,54 @@ def run(cfg: Config, src=None, reimport: bool = False, apply: bool = False) -> i
     if not src.is_dir():
         log.error("source missing: %s", src)
         return 1
-    # Always ALSO recover quarantined imposters (audio != tag = mislabeled; the fingerprint finds their TRUE
-    # recording). Skip silently if the folder isn't there.
-    dirs = [src]
+    backup_db(cfg, "singletons", log)
+    bi = beetscfg.read_import(cfg)             # move-vs-copy is BEETS' call -> it dictates how we may re-tag the source
+    cache = verify.load_idcache(cfg)           # prior identities (incl. verify's imposters) + resume state
+    clean_ids = _clean_recording_ids(cfg)      # so a loose copy of a track already in clean is NOT re-added
+    inc = "-I" if reimport else "-i"           # -I re-evaluates album-rejected folders as singletons
+
+    # Each entry = (walk_dir, import_dir, inc_flag, staging|None). The SOURCE re-tag MUST respect beets' decision:
+    # a CONSUMED source (move/delete) may be re-tagged in place; a PRESERVED source must never be mutated.
+    plan: list = []
+    if bi.source_consumed:
+        plan.append((src, src, inc, None))                         # files leave the source anyway -> re-tag in place
+    elif bi.copy or bi.reflink or bi.hardlink:                     # preserved, but beets makes an INDEPENDENT copy
+        staging = cfg.beetsdir / STAGING                           # -> re-tag throwaway COPIES, source left untouched
+        if apply:
+            with suppress(OSError):
+                shutil.rmtree(staging)                             # clean slate: a killed run can't poison this one
+            staging.mkdir(parents=True, exist_ok=True)
+        plan.append((src, staging, "-I", staging))                 # staging is fresh each run -> always re-evaluate
+        log.info("singletons: source preserved (%s) -> re-tag copies in staging, source untouched", bi.label)
+    else:                                                          # symlink / in-place: the library REFERENCES the
+        log.warning("singletons: source preserved (%s) references originals -> source re-tag SKIPPED "  # source file
+                    "(use move/copy/reflink/hardlink mode to recover loose source tracks)", bi.label)
+
     imposters = cfg.dump / "imposters"
     if imposters.is_dir():
-        dirs.append(imposters)                     # quarantined imposters get the same fingerprint-first pass
+        plan.append((imposters, imposters, inc, None))             # gbc-owned quarantine -> always re-tag in place
     else:
         log.info("singletons: no %s -> imposters step skipped", imposters)
-    backup_db(cfg, "singletons", log)
-    # FINGERPRINT-FIRST: identify every loose file by its audio + re-tag to the true recording BEFORE import,
-    # so a bad tag no longer makes it skip. Cached -> re-runs only fingerprint new files.
-    cache = verify.load_idcache(cfg)               # prior identities (incl. verify's imposters) + resume state.
-    # Unlike the MB tracklist cache, the idcache is intentionally NOT refreshed by --reimport: re-fingerprinting
-    # the whole source is a multi-day op, so cached AcoustID identities (incl. `null` for unidentified files)
-    # persist across runs. To force a clean re-fingerprint, delete BEETSDIR/gbc-acoustid-id-cache.jsonl.
-    clean_ids = _clean_recording_ids(cfg)          # so a loose copy of a track already in clean is NOT re-added
-    for d in dirs:
-        _fingerprint_retag(cfg, d, cache, clean_ids, log, apply)
-    # (no save here: _fingerprint_retag APPENDS each fresh identity to the JSONL cache as it goes -- a killed walk
-    # resumes from the last line and never holds the whole cache in RAM)
+
+    # FINGERPRINT-FIRST: identify every loose file by its audio + re-tag (in place, or onto a staging copy) BEFORE
+    # import, so a bad tag no longer makes it skip. Cached -> re-runs only fingerprint new files.
+    for walk, _imp, _inc, staging in plan:
+        _fingerprint_retag(cfg, walk, cache, clean_ids, log, apply, staging=staging)
+
     # DRY-RUN = identification only. The import must NOT run dry: it would mark the folders "seen" (incremental),
-    # so a later `--apply` would skip the now-re-tagged files. So gate import + re-tag-dependent steps on --apply.
+    # so a later --apply would skip the now-re-tagged files. Gate import + re-tag-dependent steps on --apply.
     if apply:
         before = count_items(cfg, ["ls"], "singletons")
-        inc = "-I" if reimport else "-i"           # -I re-evaluates album-rejected folders as singletons
-        for d in dirs:
-            artfix.run(cfg, src=d, log=log)        # strip mime=None WMA art so scrub can't crash beet import
-            rc, _ = run_beet(cfg, ["import", "-q", "-s", inc, str(d)], passname="singletons")
+        for _walk, imp_dir, inc_flag, staging in plan:
+            artfix.run(cfg, src=imp_dir, log=log)      # strip mime=None WMA art so scrub can't crash beet import
+            rc, _ = run_beet(cfg, ["import", "-q", "-s", inc_flag, str(imp_dir)], passname="singletons")
             if rc:
-                log.error("beet import -s %s failed (rc=%d) -- nothing deleted", d, rc)
+                log.error("beet import -s %s failed (rc=%d) -- nothing deleted", imp_dir, rc)
                 return rc
-        added = count_items(cfg, ["ls"], "singletons") - before   # already-present tracks dup-skip; delta = new
+            if staging is not None:
+                with suppress(OSError):
+                    shutil.rmtree(staging)             # throwaway copies; the clean copies beets made are independent
+        added = count_items(cfg, ["ls"], "singletons") - before    # already-present tracks dup-skip; delta = new
         log.info("singletons: +%d loose track(s) recovered -> _Singles/", added)
     else:
         log.info("singletons: dry-run -- identification only; re-run with --apply to re-tag + import")
@@ -81,6 +104,8 @@ def run(cfg: Config, src=None, reimport: bool = False, apply: bool = False) -> i
 
 
 _AUDIO_EXT = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wma", ".wav", ".aiff", ".aif"}
+STAGING = ".gbc-singletons-staging"                 # preserve-mode: throwaway re-tagged copies, imported from here
+RETAG_BACKUP = "gbc-singletons-retag-backup.jsonl"  # original tags saved before an in-place AcoustID re-tag
 
 
 def _clean_recording_ids(cfg: Config) -> set:
@@ -92,14 +117,28 @@ def _clean_recording_ids(cfg: Config) -> set:
     return {ln.strip() for ln in text.splitlines() if ln.strip()}
 
 
-def _fingerprint_retag(cfg: Config, directory: Path, cache: dict, clean_ids: set, log, apply: bool) -> tuple[int, int]:
+def _backup_tags(cfg: Config, path: Path, mf) -> None:
+    """Append the ORIGINAL title/artist/mb_trackid to a backup log BEFORE an in-place AcoustID re-tag overwrites
+    them -- the safety net when the source is CONSUMED (a rare confident-but-wrong AcoustID match stays
+    reversible). Preserve-mode staging needs none: it re-tags a copy, so the original file is never overwritten."""
+    rec = {"path": str(path), "title": mf.title, "artist": mf.artist, "mb_trackid": mf.mb_trackid}
+    bp = cfg.beetsdir / RETAG_BACKUP
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    with bp.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        fh.flush()
+
+
+def _fingerprint_retag(cfg: Config, directory: Path, cache: dict, clean_ids: set, log, apply: bool,
+                       staging: Path | None = None) -> tuple[int, int]:
     """Fingerprint-FIRST identity for every loose audio file under `directory`: ask AcoustID what the audio
     really is and overwrite its artist/title/mb_trackid with that recording, so the singleton import matches it
     instead of skipping on bad tags (audio = source of truth; metadata only corroborates at import). If the
     audio is ALREADY in clean (any of its recording ids in `clean_ids`), re-tag it to the in-clean id so the
     import DUP-skips it rather than adding a duplicate single. Ambiguous/unidentifiable files are LEFT UNTOUCHED.
     `cache` is verify's SHARED id-cache; values are [rid, artist, title, [all_ids]] (or the 3-field form verify
-    pre-writes for imposters), or null. Writes only with --apply. Returns (identified, left)."""
+    pre-writes for imposters), or null. Writes only with --apply: in place (originals backed up first), or -- when
+    `staging` is set, for a PRESERVED source -- onto a throwaway COPY in `staging`. Returns (identified, left)."""
     if not verify._acoustid_available():
         log.info("%s: pyacoustid absent -> AcoustID identify skipped", directory.name)
         return 0, 0
@@ -140,7 +179,13 @@ def _fingerprint_retag(cfg: Config, directory: Path, cache: dict, clean_ids: set
             log.info("  re-id%s: %s -> %s - %s [%s]%s", "" if apply else " (dry)", p.name, artist, title, tag_id,
                      "  (already in clean -> dup-skip)" if in_clean else "")
             if apply:
-                mf = mediafile.MediaFile(str(p))
+                if staging is not None:                # preserved source -> re-tag a throwaway COPY, never the original
+                    dest = unique_dest(staging, p.name)
+                    shutil.copy2(str(p), str(dest))
+                    mf = mediafile.MediaFile(str(dest))
+                else:                                  # consumed source / gbc-owned quarantine -> re-tag in place
+                    mf = mediafile.MediaFile(str(p))
+                    _backup_tags(cfg, p, mf)           # save original tags first (reversible if AcoustID was wrong)
                 mf.title = title
                 if artist:
                     mf.artist = artist
@@ -154,32 +199,27 @@ def _fingerprint_retag(cfg: Config, directory: Path, cache: dict, clean_ids: set
 def _promote_complete(cfg: Config, log, apply: bool, refresh: bool = False) -> int:
     """Group loose singletons by their matched release; an album whose ENTIRE MusicBrainz tracklist is now
     present as singletons is re-imported as a real album (beets routes it to <artist>/_Various Artists/
-    _Soundtracks per the paths rules). ROBUST: completeness is decided against the live MB release tracklist,
-    not the stored `tracktotal` -- tracktotal is only a cheap pre-filter to skip pointless MB calls. `refresh`
-    (a --reimport run) re-pulls the persisted MB tracklist cache instead of reusing it."""
-    _, text = run_beet(cfg, ["ls", "-f", "$mb_albumid\t$id\t$mb_trackid\t$tracktotal\t$path",
+    _Soundtracks per the paths rules). ROBUST: completeness is decided SOLELY against the live MB release
+    tracklist (fetched once per release, then cached) -- NEVER the stored `tracktotal`, which a bad rip can
+    inflate and thereby skip a genuinely-complete set. `refresh` (a --reimport run) re-pulls the persisted
+    MB tracklist cache instead of reusing it."""
+    _, text = run_beet(cfg, ["ls", "-f", "$mb_albumid\t$id\t$mb_trackid\t$path",
                              "singleton:1", "mb_albumid::."], passname="singletons", echo_lines=False)
-    albums: dict = defaultdict(lambda: {"items": [], "total": 0})
+    albums: dict = defaultdict(list)
     for line in text.splitlines():
         albumid, _, rest = line.partition("\t")
         sid, _, rest = rest.partition("\t")
-        tid, _, rest = rest.partition("\t")
-        tt, _, path = rest.partition("\t")
+        tid, _, path = rest.partition("\t")
         if albumid.strip() and path:
-            a = albums[albumid.strip()]
-            a["items"].append((sid.strip(), tid.strip(), path))
-            a["total"] = max(a["total"], int(tt) if tt.strip().isdigit() else 0)
+            albums[albumid.strip()].append((sid.strip(), tid.strip(), path))
     cache = load_release_cache(cfg, refresh)          # persisted MB tracklists, shared with verify's demote
     promoted = 0
-    for albumid, a in albums.items():
-        items = a["items"]
-        if a["total"] and len(items) < a["total"]:
-            continue                                  # cheap pre-filter: fewer tracks present than the album has
+    for albumid, items in albums.items():
         if albumid not in cache:
-            cache[albumid] = release_recordings(albumid)
+            cache[albumid] = release_recordings(albumid)   # one fetch/release, cached across runs (cheap after)
         official = cache[albumid]
         have = {tid for _, tid, _ in items if tid}
-        if not official or not official <= have:      # robust: every MB tracklist recording must be present
+        if not official or not official <= have:      # completeness decided ONLY by the live MB tracklist
             continue
         if _assemble_album(cfg, albumid, items, log, apply):
             promoted += 1
@@ -215,9 +255,17 @@ def _assemble_album(cfg: Config, albumid: str, items, log, apply: bool) -> bool:
     if any(p.is_file() for p in staging.iterdir()):   # leftover -> restore as singletons (no loss)
         log.warning("  promote %s: album import left files -> restoring as singletons", label)
         run_beet(cfg, ["import", "-q", "-I", "-s", "-A", "-m", str(staging)], passname="singletons")
+    leftover = [p.name for p in staging.iterdir() if p.is_file()]   # rows already dropped -> anything left is orphaned
+    if leftover:
+        log.error("  promote %s: %d file(s) still in %s after restore -- lib rows dropped, files kept for manual "
+                  "recovery (NOT lost)", label, len(leftover), staging)
+        return False                                  # don't rmdir, don't claim PROMOTED -- files are orphaned
     with suppress(OSError):
         staging.rmdir()
         staging.parent.rmdir()
     prune_empty_dirs(cfg.clean / "_Singles")
+    if rc:                                            # album import failed but the singleton restore recovered them
+        log.warning("  promote %s: album import rc=%d -- files restored as singletons, NOT promoted", label, rc)
+        return False
     log.info("  PROMOTED album -> %s", label)
-    return rc == 0
+    return True
